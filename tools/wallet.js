@@ -158,94 +158,118 @@ export async function swapToken({
     };
   }
 
-  try {
-    log("swap", `${amount} of ${input_mint} → ${output_mint}`);
-    const wallet = getWallet();
-    const connection = getConnection();
+  const MAX_RETRIES = 5;
+  const SLIPPAGE_SCHEDULE = [50, 100, 200, 500, 1000]; // bps: 0.5%, 1%, 2%, 5%, 10%
+  const RETRY_DELAY_MS = 1000;
 
-    // ─── Convert to smallest unit ──────────────────────────────
-    let decimals = 9; // SOL default
-    if (input_mint !== config.tokens.SOL) {
-      const mintInfo = await connection.getParsedAccountInfo(new PublicKey(input_mint));
-      decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+  const wallet = getWallet();
+  const connection = getConnection();
+
+  // ─── Convert to smallest unit ──────────────────────────────
+  let decimals = 9;
+  if (input_mint !== config.tokens.SOL) {
+    const mintInfo = await connection.getParsedAccountInfo(new PublicKey(input_mint));
+    decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+  }
+  const amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
+
+  const referralParams = getJupiterReferralParams();
+  const jupiterApiKey = getJupiterApiKey();
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const slippageBps = SLIPPAGE_SCHEDULE[attempt];
+
+    try {
+      log("swap", `${amount} of ${input_mint} → ${output_mint} (attempt ${attempt + 1}/${MAX_RETRIES}, slippage=${slippageBps}bps)`);
+
+      // ─── Get Swap V2 order (unsigned tx + requestId) ───────────
+      const search = new URLSearchParams({
+        inputMint: input_mint,
+        outputMint: output_mint,
+        amount: amountStr,
+        taker: wallet.publicKey.toString(),
+        slippageBps: String(slippageBps),
+      });
+      if (referralParams) {
+        search.set("referralAccount", referralParams.referralAccount);
+        search.set("referralFee", String(referralParams.referralFee));
+      }
+      const orderUrl = `${JUPITER_SWAP_V2_API}/order?${search.toString()}`;
+
+      const orderRes = await fetch(orderUrl, {
+        headers: jupiterApiKey ? { "x-api-key": jupiterApiKey } : {},
+      });
+      if (!orderRes.ok) {
+        const body = await orderRes.text();
+        throw new Error(`Swap V2 order failed: ${orderRes.status} ${body}`);
+      }
+
+      const order = await orderRes.json();
+      if (order.errorCode || order.errorMessage) {
+        throw new Error(`Swap V2 order error: ${order.errorMessage || order.errorCode}`);
+      }
+
+      const { transaction: unsignedTx, requestId } = order;
+
+      // ─── Deserialize and sign ─────────────────────────────────
+      const tx = VersionedTransaction.deserialize(Buffer.from(unsignedTx, "base64"));
+      tx.sign([wallet]);
+      const signedTx = Buffer.from(tx.serialize()).toString("base64");
+
+      // ─── Execute ───────────────────────────────────────────────
+      const execRes = await fetch(`${JUPITER_SWAP_V2_API}/execute`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(jupiterApiKey ? { "x-api-key": jupiterApiKey } : {}),
+        },
+        body: JSON.stringify({ signedTransaction: signedTx, requestId }),
+      });
+      if (!execRes.ok) {
+        throw new Error(`Swap V2 execute failed: ${execRes.status} ${await execRes.text()}`);
+      }
+
+      const result = await execRes.json();
+      if (result.status === "Failed") {
+        throw new Error(`Swap failed on-chain: code=${result.code}`);
+      }
+
+      log("swap", `SUCCESS tx: ${result.signature} (slippageBps=${slippageBps})`);
+      if (referralParams && order.feeBps !== referralParams.referralFee) {
+        log(
+          "swap_warn",
+          `Jupiter referral fee requested ${referralParams.referralFee} bps but order applied ${order.feeBps ?? "unknown"} bps`,
+        );
+      }
+
+      return {
+        success: true,
+        tx: result.signature,
+        input_mint,
+        output_mint,
+        amount_in: result.inputAmountResult,
+        amount_out: result.outputAmountResult,
+        slippage_bps: slippageBps,
+        referral_account: referralParams?.referralAccount || null,
+        referral_fee_bps_requested: referralParams?.referralFee || 0,
+        fee_bps_applied: order.feeBps ?? null,
+        fee_mint: order.feeMint ?? null,
+      };
+    } catch (error) {
+      const isLastAttempt = attempt === MAX_RETRIES - 1;
+      log("swap_retry", `attempt ${attempt + 1}/${MAX_RETRIES} slippageBps=${slippageBps} failed: ${error.message}${isLastAttempt ? " — RETRIES EXHAUSTED" : " — retrying"}`);
+
+      if (isLastAttempt) {
+        log("swap_error", `All ${MAX_RETRIES} swap attempts failed: ${error.message}`);
+        return {
+          success: false,
+          error: error.message,
+          retries_exhausted: true,
+          attempts: MAX_RETRIES,
+        };
+      }
+
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     }
-    const amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
-
-    // ─── Get Swap V2 order (unsigned tx + requestId) ───────────
-    const search = new URLSearchParams({
-      inputMint: input_mint,
-      outputMint: output_mint,
-      amount: amountStr,
-      taker: wallet.publicKey.toString(),
-    });
-    const referralParams = getJupiterReferralParams();
-    if (referralParams) {
-      search.set("referralAccount", referralParams.referralAccount);
-      search.set("referralFee", String(referralParams.referralFee));
-    }
-    const orderUrl = `${JUPITER_SWAP_V2_API}/order?${search.toString()}`;
-    const jupiterApiKey = getJupiterApiKey();
-
-    const orderRes = await fetch(orderUrl, {
-      headers: jupiterApiKey ? { "x-api-key": jupiterApiKey } : {},
-    });
-    if (!orderRes.ok) {
-      const body = await orderRes.text();
-      throw new Error(`Swap V2 order failed: ${orderRes.status} ${body}`);
-    }
-
-    const order = await orderRes.json();
-    if (order.errorCode || order.errorMessage) {
-      throw new Error(`Swap V2 order error: ${order.errorMessage || order.errorCode}`);
-    }
-
-    const { transaction: unsignedTx, requestId } = order;
-
-    // ─── Deserialize and sign ─────────────────────────────────
-    const tx = VersionedTransaction.deserialize(Buffer.from(unsignedTx, "base64"));
-    tx.sign([wallet]);
-    const signedTx = Buffer.from(tx.serialize()).toString("base64");
-
-    // ─── Execute ───────────────────────────────────────────────
-    const execRes = await fetch(`${JUPITER_SWAP_V2_API}/execute`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(jupiterApiKey ? { "x-api-key": jupiterApiKey } : {}),
-      },
-      body: JSON.stringify({ signedTransaction: signedTx, requestId }),
-    });
-    if (!execRes.ok) {
-      throw new Error(`Swap V2 execute failed: ${execRes.status} ${await execRes.text()}`);
-    }
-
-    const result = await execRes.json();
-    if (result.status === "Failed") {
-      throw new Error(`Swap failed on-chain: code=${result.code}`);
-    }
-
-    log("swap", `SUCCESS tx: ${result.signature}`);
-    if (referralParams && order.feeBps !== referralParams.referralFee) {
-      log(
-        "swap_warn",
-        `Jupiter referral fee requested ${referralParams.referralFee} bps but order applied ${order.feeBps ?? "unknown"} bps`,
-      );
-    }
-
-    return {
-      success: true,
-      tx: result.signature,
-      input_mint,
-      output_mint,
-      amount_in: result.inputAmountResult,
-      amount_out: result.outputAmountResult,
-      referral_account: referralParams?.referralAccount || null,
-      referral_fee_bps_requested: referralParams?.referralFee || 0,
-      fee_bps_applied: order.feeBps ?? null,
-      fee_mint: order.feeMint ?? null,
-    };
-  } catch (error) {
-    log("swap_error", error.message);
-    return { success: false, error: error.message };
   }
 }

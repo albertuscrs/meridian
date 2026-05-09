@@ -101,6 +101,32 @@ const client = new OpenAI({
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
 
+// Screening-specific client (e.g. Xiaomi Token Plan Singapore) — lazy init
+let _screeningClient = null;
+function getScreeningClient() {
+  const baseUrl = config.llm.screeningBaseUrl;
+  const apiKey  = config.llm.screeningApiKey;
+  if (!baseUrl) return client; // no screening endpoint configured — use global client
+  if (!_screeningClient || _screeningClient._baseUrl !== baseUrl) {
+    _screeningClient = new OpenAI({ baseURL: baseUrl, apiKey, timeout: 5 * 60 * 1000 });
+    _screeningClient._baseUrl = baseUrl;
+  }
+  return _screeningClient;
+}
+
+// Global fallback client — backs up all roles when primary fails with 502/503/529
+let _fallbackClient = null;
+function getFallbackClient() {
+  const baseUrl = config.llm.fallbackBaseUrl;
+  const apiKey  = config.llm.fallbackApiKey;
+  if (!baseUrl) return client; // no fallback configured — use global client
+  if (!_fallbackClient || _fallbackClient._baseUrl !== baseUrl) {
+    _fallbackClient = new OpenAI({ baseURL: baseUrl, apiKey, timeout: 5 * 60 * 1000 });
+    _fallbackClient._baseUrl = baseUrl;
+  }
+  return _fallbackClient;
+}
+
 const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself)\b/i;
 const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons)\b/i;
 const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|see)\b.*\b(config|settings?|thresholds?)\b/i;
@@ -188,16 +214,19 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       const activeModel = model || DEFAULT_MODEL;
 
       // Retry up to 3 times on transient provider errors (502, 503, 529)
-      const FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
+      const FALLBACK_MODEL = config.llm.fallbackModel || "stepfun/step-3.5-flash:free";
       let response;
       let usedModel = activeModel;
+      // Select primary client based on agent role
+      let activeClient = agentType === "SCREENER" ? getScreeningClient() : client;
+      let switchedToFallback = false;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          response = await client.chat.completions.create({
+          response = await activeClient.chat.completions.create({
             model: usedModel,
             messages,
             tools: getToolsForRole(agentType, goal),
@@ -225,9 +254,12 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         const errCode = response.error?.code;
         if (errCode === 502 || errCode === 503 || errCode === 529) {
           const wait = (attempt + 1) * 5000;
-          if (attempt === 1 && usedModel !== FALLBACK_MODEL) {
+          if (attempt === 1 && !switchedToFallback) {
+            // Switch to global fallback client + fallback model
+            activeClient = getFallbackClient();
             usedModel = FALLBACK_MODEL;
-            log("agent", `Switching to fallback model ${FALLBACK_MODEL}`);
+            switchedToFallback = true;
+            log("agent", `Switching to fallback: ${FALLBACK_MODEL} via ${config.llm.fallbackBaseUrl || "default"}`);
           } else {
             log("agent", `Provider error ${errCode}, retrying in ${wait / 1000}s (attempt ${attempt + 1}/3)`);
             await new Promise((r) => setTimeout(r, wait));

@@ -31,7 +31,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "../user-config.json");
 const GMGN_CONFIG_PATH = path.join(__dirname, "../gmgn-config.json");
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, notifySwapFailure } from "../telegram.js";
 
 const SENSITIVE_CONFIG_KEYS = new Set([
   "gmgnApiKey",
@@ -146,6 +146,18 @@ const toolMap = {
     return { error: "invalid mode" };
   },
   update_config: ({ changes, reason = "" }) => {
+    // Keys that are operator-only — LLM cannot change these via update_config
+    const OPERATOR_ONLY_KEYS = {
+      minVolatility: ["screening", "minVolatility"],
+      maxVolatility: ["screening", "maxVolatility"],
+      maxFeeActiveTvlRatio: ["screening", "maxFeeActiveTvlRatio"],
+      screeningBaseUrl: ["llm", "screeningBaseUrl"],
+      screeningApiKey: ["llm", "screeningApiKey"],
+      fallbackModel: ["llm", "fallbackModel"],
+      fallbackBaseUrl: ["llm", "fallbackBaseUrl"],
+      fallbackApiKey: ["llm", "fallbackApiKey"],
+    };
+
     // Flat key → config section mapping (covers everything in config.js)
     const CONFIG_MAP = {
       // screening
@@ -181,10 +193,18 @@ const toolMap = {
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
-      outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
-      outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
+      outOfRangeBinsToClose:      ["management", "outOfRangeBinsToClose"],
+      outOfRangeWaitMinutes:      ["management", "outOfRangeWaitMinutes"],
+      outOfRangeBelowWaitMinutes: ["management", "outOfRangeBelowWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
+      lowYieldCooldownHours: ["management", "lowYieldCooldownHours"],
+      stopLossCooldownHours: ["management", "stopLossCooldownHours"],
+      lossGt1PctCooldownHours: ["management", "lossGt1PctCooldownHours"],
+      oorBigLossCooldownHours: ["management", "oorBigLossCooldownHours"],
+      oorBigLossPnlThreshold: ["management", "oorBigLossPnlThreshold"],
+      cumulativeLossCooldownHours: ["management", "cumulativeLossCooldownHours"],
+      cumulativeLossThreshold: ["management", "cumulativeLossThreshold"],
       repeatDeployCooldownEnabled: ["management", "repeatDeployCooldownEnabled"],
       repeatDeployCooldownTriggerCount: ["management", "repeatDeployCooldownTriggerCount"],
       repeatDeployCooldownHours: ["management", "repeatDeployCooldownHours"],
@@ -192,6 +212,8 @@ const toolMap = {
       repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
+      minProfitPctToCloseOOR: ["management", "minProfitPctToCloseOOR"],
+      closeProfile: ["management", "closeProfile"],
       takeProfitPct: ["management", "takeProfitPct"],
       takeProfitFeePct: ["management", "takeProfitPct"],
       trailingTakeProfit: ["management", "trailingTakeProfit"],
@@ -293,16 +315,46 @@ const toolMap = {
 
     const applied = {};
     const unknown = [];
+    const operatorOnlyKeysAttempted = [];
 
-    // Build case-insensitive lookup
+    // Build case-insensitive lookups
     const CONFIG_MAP_LOWER = Object.fromEntries(
       Object.entries(CONFIG_MAP).map(([k, v]) => [k.toLowerCase(), [k, v]])
     );
+    const OPERATOR_ONLY_LOWER = Object.fromEntries(
+      Object.entries(OPERATOR_ONLY_KEYS).map(([k, v]) => [k.toLowerCase(), [k, v]])
+    );
+
+    // Detect if caller is the Telegram settings menu (operator) vs LLM agent
+    const callerIsOperator = reason === "Telegram settings menu";
 
     for (const [key, val] of Object.entries(changes)) {
       const match = CONFIG_MAP[key] ? [key, CONFIG_MAP[key]] : CONFIG_MAP_LOWER[key.toLowerCase()];
-      if (!match) { unknown.push(key); continue; }
+      if (!match) {
+        // Check if it's an operator-only key
+        const opMatch = OPERATOR_ONLY_LOWER[key.toLowerCase()];
+        if (opMatch) {
+          if (!callerIsOperator) {
+            operatorOnlyKeysAttempted.push(key);
+            continue;
+          }
+          applied[opMatch[0]] = val;
+        } else {
+          unknown.push(key);
+        }
+        continue;
+      }
       applied[match[0]] = val;
+    }
+
+    if (operatorOnlyKeysAttempted.length > 0) {
+      log("config", `update_config: LLM blocked from operator-only keys: ${JSON.stringify(operatorOnlyKeysAttempted)}`);
+      return { success: false, unknown: operatorOnlyKeysAttempted, reason, blocked: true };
+    }
+
+    if (Object.keys(applied).length === 0) {
+      log("config", `update_config failed — unknown keys: ${JSON.stringify(unknown)}, raw changes: ${JSON.stringify(changes)}`);
+      return { success: false, unknown, reason };
     }
 
     if (Object.keys(applied).length === 0) {
@@ -312,7 +364,7 @@ const toolMap = {
 
     // Apply to live config immediately
     for (const [key, val] of Object.entries(applied)) {
-      const [section, field, third] = CONFIG_MAP[key];
+      const [section, field, third] = CONFIG_MAP[key] || OPERATOR_ONLY_KEYS[key];
       const isNestedField = typeof third === "string"; // string = nested subfield, array = persistPath
       if (isNestedField) {
         if (!config[section][field] || typeof config[section][field] !== "object") config[section][field] = {};
@@ -338,7 +390,7 @@ const toolMap = {
     let wroteUserConfig = false;
     let wroteGmgnConfig = false;
     for (const [key, val] of Object.entries(applied)) {
-      const [section, field, third] = CONFIG_MAP[key] || [];
+      const [section, field, third] = CONFIG_MAP[key] || OPERATOR_ONLY_KEYS[key] || [];
       const persistPath = Array.isArray(third) ? third : null;
       const nestedField = typeof third === "string" ? third : null;
       if (section === "gmgn") {
@@ -456,10 +508,23 @@ export async function executeTool(name, args) {
     if (success) {
       if (name === "swap_token" && result.tx) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
+      } else if (name === "swap_token" && result.retries_exhausted) {
+        notifySwapFailure({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), error: result.error, attempts: result.attempts }).catch(() => {});
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
       } else if (name === "close_position") {
-        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
+        notifyClose({
+          pair: result.pool_name || args.position_address?.slice(0, 8),
+          pnlUsd: result.pnl_usd ?? 0,
+          pnlSol: result.pnl_sol ?? null,
+          pnlPct: result.pnl_pct ?? 0,
+          feesUsd: result.fees_usd ?? 0,
+          feesSol: result.fees_sol ?? null,
+          deployedSol: result.amount_sol ?? null,
+          minutesHeld: result.minutes_held ?? 0,
+          reason: args.reason || null,
+          txs: result.txs || [],
+        }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;

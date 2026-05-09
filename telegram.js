@@ -22,12 +22,13 @@ let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
 
-// ─── chatId persistence ──────────────────────────────────────────
+// ─── chatId + allowedUserId persistence ─────────────────────────
 function loadChatId() {
   try {
     if (fs.existsSync(USER_CONFIG_PATH)) {
       const cfg = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
       if (cfg.telegramChatId) chatId = cfg.telegramChatId;
+      if (cfg.telegramAllowedUserId) ALLOWED_USER_IDS.add(String(cfg.telegramAllowedUserId));
     }
   } catch { /**/ }
 }
@@ -44,6 +45,19 @@ function saveChatId(id) {
   }
 }
 
+export function saveAllowedUserId(userId) {
+  try {
+    let cfg = fs.existsSync(USER_CONFIG_PATH)
+      ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
+      : {};
+    cfg.telegramAllowedUserId = String(userId);
+    fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(cfg, null, 2));
+    ALLOWED_USER_IDS.add(String(userId));
+  } catch (e) {
+    log("telegram_error", `Failed to persist allowedUserId: ${e.message}`);
+  }
+}
+
 loadChatId();
 
 function isAuthorizedIncomingMessage(msg) {
@@ -53,13 +67,16 @@ function isAuthorizedIncomingMessage(msg) {
 
   if (!chatId) {
     if (!_warnedMissingChatId) {
-      log("telegram_warn", "Ignoring inbound Telegram messages because TELEGRAM_CHAT_ID / user-config.telegramChatId is not configured. Auto-registration is disabled for safety.");
+      log("telegram_warn", `Ignoring inbound Telegram messages because TELEGRAM_CHAT_ID / user-config.telegramChatId is not configured. chatId=${chatId} incomingChatId=${incomingChatId}`);
       _warnedMissingChatId = true;
     }
     return false;
   }
 
-  if (incomingChatId !== chatId) return false;
+  if (incomingChatId !== chatId) {
+    log("telegram_warn", `chatId mismatch: configured=${chatId} incoming=${incomingChatId}`);
+    return false;
+  }
 
   if (chatType !== "private" && ALLOWED_USER_IDS.size === 0) {
     if (!_warnedMissingAllowedUsers) {
@@ -79,6 +96,19 @@ function isAuthorizedIncomingMessage(msg) {
 // ─── Core send ───────────────────────────────────────────────────
 export function isEnabled() {
   return !!TOKEN;
+}
+
+export async function sendHTML(html) {
+  if (!TOKEN || !chatId) return;
+  return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 async function postTelegram(method, body) {
@@ -121,6 +151,47 @@ async function postTelegramRaw(method, body) {
   }
 }
 
+const BOT_COMMANDS = [
+  { command: "help", description: "Show all available commands" },
+  { command: "status", description: "Wallet balance and positions snapshot" },
+  { command: "wallet", description: "Wallet, deploy amount and HiveMind status" },
+  { command: "positions", description: "List open positions with progress bar" },
+  { command: "pool", description: "Detailed info for one open position: /pool <n>" },
+  { command: "history", description: "Last 10 closed positions with PnL and fees" },
+  { command: "learn", description: "Performance summary and recent lessons" },
+  { command: "close", description: "Close one position by index: /close <n>" },
+  { command: "closeall", description: "Close all open positions" },
+  { command: "set", description: "Set note on position: /set <n> <note>" },
+  { command: "cooldown", description: "Block a token manually: /cooldown <symbol> <hours>" },
+  { command: "uncooldown", description: "Clear token cooldown: /uncooldown <symbol>" },
+  { command: "config", description: "Show important runtime configuration" },
+  { command: "settings", description: "Open button settings menu" },
+  { command: "setcfg", description: "Update config key: /setcfg <key> <value>" },
+  { command: "screen", description: "Refresh candidate pool list" },
+  { command: "candidates", description: "Show latest cached candidate pools" },
+  { command: "deploy", description: "Deploy to candidate by index: /deploy <n>" },
+  { command: "briefing", description: "Morning briefing for last 24h" },
+  { command: "observe", description: "Exit rule snapshot — /observe [N] [details]" },
+  { command: "observeheld", description: "Positions held by Safety-Lock or Pump-Hold (24h)" },
+  { command: "observereasons", description: "Bar chart of close reasons today" },
+  { command: "observecompare", description: "Profile A/B comparison — /observecompare [B] [C]" },
+  { command: "hive", description: "HiveMind sync status or pull" },
+  { command: "pause", description: "Stop autonomous cron cycles" },
+  { command: "resume", description: "Resume autonomous cron cycles" },
+  { command: "stop", description: "Shut down the agent" },
+];
+
+export async function registerBotCommands() {
+  if (!TOKEN) return;
+  const result = await postTelegramRaw("setMyCommands", { commands: BOT_COMMANDS });
+  if (result?.ok) {
+    log("telegram", `Registered ${BOT_COMMANDS.length} bot commands`);
+  } else {
+    log("telegram_error", `setMyCommands failed: ${JSON.stringify(result)}`);
+  }
+  return result;
+}
+
 export async function sendMessage(text) {
   if (!TOKEN || !chatId) return;
   return postTelegram("sendMessage", { text: String(text).slice(0, 4096) });
@@ -134,16 +205,12 @@ export async function sendMessageWithButtons(text, inlineKeyboard) {
   });
 }
 
-export async function sendHTML(html) {
-  if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
-}
-
-export async function editMessage(text, messageId) {
+export async function editMessage(text, messageId, parseMode) {
   if (!TOKEN || !chatId || !messageId) return null;
   return postTelegram("editMessageText", {
     message_id: messageId,
     text: String(text).slice(0, 4096),
+    ...(parseMode ? { parse_mode: parseMode } : {}),
   });
 }
 
@@ -278,7 +345,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
-    await editMessage(text, state.messageId);
+    await editMessage(text, state.messageId, undefined); // plain text — no HTML mode
   }
 
   function scheduleFlush(delay = 300) {
@@ -373,6 +440,7 @@ async function poll(onMessage) {
         }
         const msg = update.message;
         if (!msg?.text) continue;
+        log("telegram_debug", `msg: text="${msg.text}" chat=${msg.chat?.id} from=${msg.from?.id}`);
         if (!isAuthorizedIncomingMessage(msg)) continue;
         await onMessage(msg);
       }
@@ -388,6 +456,7 @@ async function poll(onMessage) {
 export function startPolling(onMessage) {
   if (!TOKEN) return;
   _polling = true;
+  registerBotCommands(); // fire-and-forget — registers / command menu
   poll(onMessage); // fire-and-forget
   log("telegram", "Bot polling started");
 }
@@ -399,6 +468,7 @@ export function stopPolling() {
 // ─── Notification helpers ────────────────────────────────────────
 export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
   if (hasActiveLiveMessage()) return;
+  const SOL_EXPLORER = "https://solscan.io/tx/";
   const priceStr = priceRange
     ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
     : "";
@@ -408,39 +478,97 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   const poolStr = (binStep || baseFee)
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
+  const txStr = tx
+    ? `<a href="${SOL_EXPLORER}${escapeHtml(tx)}">${escapeHtml(tx.slice(0, 6))}…${escapeHtml(tx.slice(-4))}</a>`
+    : "—";
   await sendHTML(
-    `✅ <b>Deployed</b> ${pair}\n` +
+    `✅ <b>Deployed</b> ${escapeHtml(pair)}\n` +
     `Amount: ${amountSol} SOL\n` +
     priceStr +
     coverageStr +
     poolStr +
-    `Position: <code>${position?.slice(0, 8)}...</code>\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `Position: <code>${escapeHtml(position?.slice(0, 8) ?? "")}...</code>\n` +
+    `Tx: ${txStr}`
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, feesUsd, feesSol, deployedSol, minutesHeld, reason, txs }) {
   if (hasActiveLiveMessage()) return;
-  const sign = pnlUsd >= 0 ? "+" : "";
+  const SOL_EXPLORER = "https://solscan.io/tx/";
+
+  function fmtDuration(minutes) {
+    if (!minutes || minutes <= 0) return "—";
+    if (minutes < 60) return `${minutes}m`;
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    if (h < 24) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    const d = Math.floor(h / 24);
+    const remH = h % 24;
+    return remH > 0 ? `${d}d ${remH}h` : `${d}d`;
+  }
+
+  let pnlLine;
+  if (pnlSol != null) {
+    const sign = pnlSol >= 0 ? "+" : "";
+    const pnlEmoji = pnlSol > 0 ? "🟢" : pnlSol < 0 ? "🔴" : "⚪";
+    pnlLine = `PnL: ${pnlEmoji} ${sign}${Number(pnlSol).toFixed(4)} SOL (${sign}${(pnlPct ?? 0).toFixed(2)}%)`;
+  } else {
+    const sign = pnlUsd >= 0 ? "+" : "";
+    const pnlEmoji = pnlUsd > 0 ? "🟢" : pnlUsd < 0 ? "🔴" : "⚪";
+    pnlLine = `PnL: ${pnlEmoji} ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`;
+  }
+
+  // Show deployed → received when we have enough data
+  let flowLine = "";
+  if (deployedSol != null && pnlSol != null) {
+    const receivedSol = Number(deployedSol) + Number(pnlSol);
+    flowLine = `Deployed: ${Number(deployedSol).toFixed(4)} SOL → Received: ${receivedSol.toFixed(4)} SOL\n`;
+  }
+
+  const feesLine = feesSol != null
+    ? `Fees: $${(feesUsd ?? 0).toFixed(2)} | ${Number(feesSol).toFixed(4)} SOL`
+    : `Fees: $${(feesUsd ?? 0).toFixed(2)}`;
+  const heldLine = `Held: ${fmtDuration(minutesHeld)}`;
+  const reasonLine = reason ? `\nReason: ${escapeHtml(reason)}` : "";
+
+  // Show all TXs as individual Solscan links
+  const txLinks = (txs || [])
+    .filter(Boolean)
+    .map((h, i) => `<a href="${SOL_EXPLORER}${escapeHtml(h)}">${escapeHtml(h.slice(0, 6))}…${escapeHtml(h.slice(-4))}</a>`)
+    .join(" | ");
+
   await sendHTML(
-    `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
+    `🏁 <b>Closed</b> ${escapeHtml(pair)}\n` +
+    `${pnlLine}\n` +
+    flowLine +
+    `${feesLine} | ${heldLine}\n` +
+    `Tx: ${txLinks || "—"}${reasonLine}`
   );
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `🔄 <b>Swapped</b> ${inputSymbol} → ${outputSymbol}\n` +
+    `🔄 <b>Swapped</b> ${escapeHtml(inputSymbol)} → ${escapeHtml(outputSymbol)}\n` +
     `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `Tx: <code>${escapeHtml(tx?.slice(0, 16) ?? "")}...</code>`
+  );
+}
+
+export async function notifySwapFailure({ inputSymbol, outputSymbol, error, attempts }) {
+  if (hasActiveLiveMessage()) return;
+  await sendHTML(
+    `❌ <b>Swap Failed</b>\n` +
+    `${escapeHtml(inputSymbol)} → ${escapeHtml(outputSymbol)}\n` +
+    `Attempts: ${attempts}/5 (slippage escalated 0.5%→10%)\n` +
+    `Error: ${escapeHtml(error)}`
   );
 }
 
 export async function notifyOutOfRange({ pair, minutesOOR }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `⚠️ <b>Out of Range</b> ${pair}\n` +
+    `⚠️ <b>Out of Range</b> ${escapeHtml(pair)}\n` +
     `Been OOR for ${minutesOOR} minutes`
   );
 }
@@ -452,4 +580,32 @@ function sleep(ms) {
 function fmtPct(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
+}
+
+export function fmtRangeBar(activeBin, lowerBin, upperBin) {
+  const BAR_LEN = 16;
+  if (activeBin == null || lowerBin == null || upperBin == null) {
+    return { bar: `[${"░".repeat(BAR_LEN)}]`, pct: null, oor: null };
+  }
+  const rangeSize = upperBin - lowerBin;
+  if (rangeSize <= 0) {
+    return { bar: `[${"░".repeat(BAR_LEN)}]`, pct: null, oor: null };
+  }
+
+  let oor = null;
+
+  if (activeBin < lowerBin) {
+    oor = "below";
+    return { bar: `[${"░".repeat(BAR_LEN)}]`, pct: 0, oor };
+  }
+  if (activeBin > upperBin) {
+    oor = "above";
+    return { bar: `[${"░".repeat(BAR_LEN)}]`, pct: 100, oor };
+  }
+
+  const binPos = activeBin - lowerBin;
+  const pct = Math.round((binPos / rangeSize) * 100);
+  const filled = Math.round((binPos / rangeSize) * BAR_LEN);
+  const barStr = "█".repeat(filled) + "░".repeat(BAR_LEN - filled);
+  return { bar: `[${barStr}]`, pct, oor: null };
 }

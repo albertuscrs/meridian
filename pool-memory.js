@@ -51,10 +51,15 @@ function isAdjustedWinRateExcludedReason(reason) {
 
 function isFeeGeneratingDeploy(deploy) {
   const minFeeEarnedPct = Number(config.management.repeatDeployCooldownMinFeeEarnedPct ?? 0);
-  const feeEarnedPct = Number(deploy.fee_earned_pct ?? 0);
   const feesUsd = Number(deploy.fees_earned_usd ?? 0);
   const feesSol = Number(deploy.fees_earned_sol ?? 0);
-  const hasFees = (Number.isFinite(feesUsd) && feesUsd > 0) || (Number.isFinite(feesSol) && feesSol > 0);
+  const useSol = config.management.solMode;
+  const feeEarnedPct = useSol
+    ? Number(deploy.fee_earned_pct_sol ?? deploy.fee_earned_pct ?? 0)
+    : Number(deploy.fee_earned_pct ?? 0);
+  const hasFees = useSol
+    ? (Number.isFinite(feesSol) && feesSol > 0)
+    : (Number.isFinite(feesUsd) && feesUsd > 0);
   if (!hasFees) return false;
   return Number.isFinite(feeEarnedPct) && feeEarnedPct >= minFeeEarnedPct;
 }
@@ -126,9 +131,11 @@ export function recordPoolDeploy(poolAddress, deployData) {
     closed_at: deployData.closed_at || new Date().toISOString(),
     pnl_pct: deployData.pnl_pct ?? null,
     pnl_usd: deployData.pnl_usd ?? null,
+    pnl_sol: deployData.pnl_sol ?? null,
     fees_earned_usd: deployData.fees_earned_usd ?? null,
     fees_earned_sol: deployData.fees_earned_sol ?? null,
     fee_earned_pct: deployData.fee_earned_pct ?? null,
+    fee_earned_pct_sol: deployData.fee_earned_pct_sol ?? null,
     range_efficiency: deployData.range_efficiency ?? null,
     minutes_held: deployData.minutes_held ?? null,
     close_reason: deployData.close_reason || null,
@@ -367,6 +374,25 @@ export function recallForPool(poolAddress) {
   }
 
   return lines.length > 0 ? lines.join("\n") : null;
+}
+
+/**
+ * Returns the last n closed deploys across all pools, sorted by closed_at descending.
+ */
+export function getRecentDeploys(n = 10) {
+  const db = load();
+  const all = [];
+  for (const entry of Object.values(db)) {
+    for (const deploy of (entry.deploys || [])) {
+      all.push({ pool_name: entry.name || "?", ...deploy });
+    }
+  }
+  all.sort((a, b) => {
+    const at = a.closed_at ? new Date(a.closed_at).getTime() : 0;
+    const bt = b.closed_at ? new Date(b.closed_at).getTime() : 0;
+    return bt - at;
+  });
+  return all.slice(0, n);
 }
 
 /**

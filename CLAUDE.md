@@ -118,9 +118,9 @@ Before `deploy_position` executes:
 
 ---
 
-## bins_below Calculation (SCREENER)
+## bins_below / bins_above (SCREENER)
 
-Linear formula based on pool volatility (set in screener prompt, `index.js`):
+`bins_below` — linear formula based on pool volatility (set in screener prompt, `index.js`):
 
 ```
 bins_below = round(35 + (volatility / 5) * 34), clamped to [35, 69]
@@ -128,7 +128,18 @@ bins_below = round(35 + (volatility / 5) * 34), clamped to [35, 69]
 
 - Low volatility (0) → 35 bins
 - High volatility (5+) → 69 bins
-- Any value in between is valid (continuous, not tiered)
+
+`bins_above` — fixed config value (`config.strategy.binsAbove`, default 20). For single-sided SOL deploys
+the Meteora protocol requires `upper_bin = active_bin`, so `bins_above` does NOT widen the on-chain LP range.
+Instead it is stored in state (`bin_range.bins_above`) and used by Rule 3 in `getDeterministicCloseRule` to
+add tolerance before triggering an immediate pump-close:
+
+```
+Rule 3 fires when: active_bin > upper_bin + outOfRangeBinsToClose + bin_range.bins_above
+```
+
+Default (outOfRangeBinsToClose=8, binsAbove=20): Rule 3 fires after a ~28-bin pump vs the old 8-bin trigger.
+Positions survive moderate pumps and can resume earning fees when price returns into range.
 
 ---
 
@@ -195,6 +206,44 @@ const actualBaseFee = baseFactor > 0
 
 ---
 
+## Pool Cooldown System (pool-cooldown.js)
+
+After each position close, `evaluateAndSetCooldown()` determines appropriate cooldown periods based on the close reason and PnL severity. Cooldowns prevent re-deployment to poorly performing pools/tokens.
+
+**Close reasons and their default cooldowns:**
+
+| Reason | Cooldown | Description |
+|--------|----------|-------------|
+| `low yield` | 4h | Insufficient fee generation |
+| `stop loss` | 2h | Hit stop-loss trigger |
+| `loss > 1%` | 1h | Manual close at loss >1% (not stop loss) |
+| `oor big loss` | 6h | OOR close + pnlUsd < oorBigLossPnlThreshold (-$2) |
+| `cumulative loss > $5` | 48h | Total pool loss across all deploys exceeds threshold |
+| `oor` (repeated) | 12h | 3+ OOR closes in succession |
+| `manual` | 1h | User-initiated close |
+| `trailing tp` / `take profit` | 1-2h | Successful exits |
+
+**Key rules:**
+- When multiple cooldowns apply, the **longest duration wins**
+- Stop loss, OOR big loss, and cumulative loss > $5 trigger **base-mint cooldowns** (applies to all pools using that token)
+- OOR big loss threshold: `oorBigLossPnlThreshold` (default -$2)
+- Cumulative loss = sum of all `pnlUsd` in pool's deploy history + new close's `pnlUsd`; threshold is `cumulativeLossThreshold` (default -$5)
+- Loss > 1% cooldown triggers only for manual/user-requested closes with pnlPct < -1% (and NOT stop loss)
+
+**New config keys (management section):**
+
+| Key | Default |
+|-----|---------|
+| lowYieldCooldownHours | 4 |
+| stopLossCooldownHours | 2 |
+| lossGt1PctCooldownHours | 1 |
+| oorBigLossCooldownHours | 6 |
+| oorBigLossPnlThreshold | -2 |
+| cumulativeLossCooldownHours | 48 |
+| cumulativeLossThreshold | -5 |
+
+---
+
 ## Hive Mind (hive-mind.js)
 
 Optional feature. Enabled by setting `HIVE_MIND_URL` and `HIVE_MIND_API_KEY` in `.env`.
@@ -223,5 +272,5 @@ Not required for normal operation.
 
 ## Known Issues / Tech Debt
 
-- `lessons.js evolveThresholds()` evolves `maxVolatility` + `minFeeTvlRatio` (wrong key names — should be `minFeeActiveTvlRatio`; `maxVolatility` doesn't exist in config at all). The evolution is a no-op for those keys.
+- `lessons.js evolveThresholds()` evolves `maxVolatility` (works — `config.screening.maxVolatility` exists) and `minFeeTvlRatio` (wrong key — config uses `minFeeActiveTvlRatio`, so this evolution is a no-op). Also update `lessons.js` line 354 to reference `config.screening.minFeeActiveTvlRatio` to fix the fee/TVL evolution.
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.

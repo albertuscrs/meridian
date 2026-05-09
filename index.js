@@ -1,6 +1,7 @@
 import "./envcrypt.js";
 import cron from "node-cron";
 import readline from "readline";
+import { createReadStream } from "fs";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
@@ -8,7 +9,7 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, listLessons } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -22,11 +23,14 @@ import {
   notifyOutOfRange,
   isEnabled as telegramEnabled,
   createLiveMessage,
+  fmtRangeBar,
+  saveAllowedUserId,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote, getRecentDeploys, getPoolMemory } from "./pool-memory.js";
+import { blockDev, unblockDev, listBlockedDevs } from "./dev-blocklist.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -84,12 +88,22 @@ const _trailingDropConfirmTimers = new Map();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
+const TRAILING_DROP_CONFIRM_DELAY_MS_PECUT = 3_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 
 /** Strip <think>...</think> reasoning blocks that some models leak into output */
 function stripThink(text) {
   if (!text) return text;
   return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
+function htmlEscape(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function sanitizeUntrustedPromptText(text, maxLen = 500) {
@@ -127,6 +141,9 @@ function schedulePeakConfirmation(positionAddress) {
 function scheduleTrailingDropConfirmation(positionAddress) {
   if (!positionAddress || _trailingDropConfirmTimers.has(positionAddress)) return;
 
+  const profile = config.management.closeProfile ?? "main";
+  const confirmDelayMs = profile === "pecut" ? TRAILING_DROP_CONFIRM_DELAY_MS_PECUT : TRAILING_DROP_CONFIRM_DELAY_MS;
+
   const timer = setTimeout(async () => {
     _trailingDropConfirmTimers.delete(positionAddress);
     try {
@@ -137,15 +154,16 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         position?.pnl_pct ?? null,
         config.management.trailingDropPct,
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
+        `${confirmDelayMs / 1000}s`,
       );
       if (resolved?.confirmed) {
-        log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
+        log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management (window: ${confirmDelayMs}ms)`);
         runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing recheck management failed: ${e.message}`));
       }
     } catch (error) {
       log("state_warn", `Trailing drop confirmation failed for ${positionAddress}: ${error.message}`);
     }
-  }, TRAILING_DROP_CONFIRM_DELAY_MS);
+  }, confirmDelayMs);
 
   _trailingDropConfirmTimers.set(positionAddress, timer);
 }
@@ -190,6 +208,14 @@ function stopCronJobs() {
 
 export async function runManagementCycle({ silent = false } = {}) {
   if (_managementBusy) return null;
+
+  // Skip RPC round-trip if state shows no open positions
+  if (getTrackedPositions(true).length === 0) {
+    log("cron", "No open positions (state) — skipping management, triggering screening");
+    runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+    return "No open positions. Triggering screening cycle.";
+  }
+
   _managementBusy = true;
   timers.managementLastRun = Date.now();
   log("cron", "Starting management cycle");
@@ -230,10 +256,8 @@ export async function runManagementCycle({ silent = false } = {}) {
       }
       const exit = updatePnlAndCheckExits(p.position, p, config.management);
       if (exit) {
-        if (exit.action === "TRAILING_TP" && exit.needs_confirmation && shouldUsePnlRecheck()) {
-          if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
-            scheduleTrailingDropConfirmation(p.position);
-          }
+        if (exit.action === "TRAILING_TP_QUEUED") {
+          scheduleTrailingDropConfirmation(p.position);
           continue;
         }
         exitMap.set(p.position, exit.reason);
@@ -273,33 +297,85 @@ export async function runManagementCycle({ silent = false } = {}) {
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
 
-    const reportLines = positionData.map((p) => {
+      const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
-      if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
-      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
-      return line;
+      const cur = config.management.solMode ? "◎" : "$";
+      const pnlSign = (p.pnl_pct ?? 0) >= 0 ? "+" : "";
+      const pnlPctStr = `${pnlSign}${(p.pnl_pct ?? 0).toFixed(1)}%`;
+      const pnlUsdStr = (p.pnl_usd ?? 0) >= 0 ? `+${cur}${(p.pnl_usd ?? 0).toFixed(3)}` : `-${cur}${(Math.abs(p.pnl_usd) ?? 0).toFixed(3)}`;
+      const pnlEmoji = (p.pnl_pct ?? 0) >= 0 ? "🟢" : "🔴";
+      const range = fmtRangeBar(p.active_bin, p.lower_bin, p.upper_bin);
+      const rangeEmoji = range.oor ? "🔴" : "🟢";
+      const rangeLabel = range.oor
+        ? `${range.bar} bin ${p.active_bin} (${range.oor} ${p.lower_bin}–${p.upper_bin})`
+        : `${range.bar} ${range.pct}% (bin ${p.active_bin}/${p.lower_bin}–${p.upper_bin})`;
+      const val = `${cur}${(p.total_value_usd ?? 0).toFixed(3)}`;
+      const unclaimed = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(3)}`;
+      const feeStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%/24h` : "—";
+      const ageStr = p.age_minutes != null ? `${p.age_minutes}m` : "—m";
+      const rangeLine = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+      const actionTag = act.action === "INSTRUCTION" ? "📋 HOLD" :
+                        act.action === "CLOSE" ? "⚡ CLOSE" :
+                        act.action === "CLAIM" ? "📥 CLAIM" : "";
+
+      const block = [`📊 ${htmlEscape(p.pair)} | ${p.strategy ?? "spot"}`,
+        `   💰 ${val} | PnL: ${pnlEmoji} ${pnlPctStr} (${pnlUsdStr}) | Range: ${rangeEmoji} ${rangeLabel} | 📥 ${unclaimed} | 📈 ${feeStr}`,
+        `   ${rangeLine} | ⏱ ${ageStr} ${actionTag}`,
+      ];
+
+      if (p.instruction) block.push(`   📝 "${htmlEscape(p.instruction)}"`);
+      if (act.action === "CLOSE") block.push(`   ⚡ ${htmlEscape(act.reason)}`);
+      if (act.action === "CLAIM") block.push(`   📥 Claiming fees`);
+
+      return block.join("\n");
     });
 
+    const stayCount = [...actionMap.values()].filter(a => a.action === "STAY").length;
     const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
     const actionSummary = needsAction.length > 0
-      ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
-      : "no action";
-
+      ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL" : a.action).join(", ")
+      : "none";
+    const avgPnl = positionData.reduce((s, p) => s + (p.pnl_pct ?? 0), 0) / (positionData.length || 1);
+    const avgSign = avgPnl >= 0 ? "+" : "";
     const cur = config.management.solMode ? "◎" : "$";
-    mgmtReport = reportLines.join("\n\n") +
-      `\n\nSummary: 💼 ${positions.length} positions | ${cur}${totalValue.toFixed(4)} | fees: ${cur}${totalUnclaimed.toFixed(4)} | ${actionSummary}`;
 
-    // ── Call LLM only if action needed ──────────────────────────────
+    mgmtReport =
+      reportLines.join("\n\n") +
+      `\n\n📦 ${positions.length} positions | 💵 ${cur}${totalValue.toFixed(3)} | 📥 fees: ${cur}${totalUnclaimed.toFixed(3)}` +
+      `\n📊 Avg PnL: ${avgSign}${avgPnl.toFixed(2)}% | 🔔 Action: ${actionSummary} | ✅ Stay: ${stayCount}`;
+
+    // ── Direct-close hard exits (skip LLM for speed) ─────────────────
+    // Stop-loss, trailing TP, and other updatePnlAndCheckExits triggers are
+    // already fully decided — no LLM judgment needed. Execute immediately to
+    // minimise the gap between SL detection and actual close/swap execution.
+    const hardExitPositions = positionData.filter(p => actionMap.get(p.position)?.rule === "exit");
+    if (hardExitPositions.length > 0) {
+      log("cron", `Management: ${hardExitPositions.length} hard exit(s) — bypassing LLM`);
+      const hardCloseResults = await Promise.allSettled(
+        hardExitPositions.map(async (p) => {
+          const reason = exitMap.get(p.position);
+          await liveMessage?.toolStart("close_position");
+          const result = await executeTool("close_position", { position_address: p.position, reason });
+          await liveMessage?.toolFinish("close_position", result, result?.success !== false);
+          return { pair: p.pair, reason, result };
+        })
+      );
+      const hardSummary = hardCloseResults.map((r) => {
+        if (r.status === "fulfilled") {
+          const { pair, reason, result } = r.value;
+          return result?.success === false
+            ? `⚡ ${htmlEscape(pair)} close FAILED: ${htmlEscape(result.error || "unknown error")}`
+            : `⚡ ${htmlEscape(pair)} closed — ${htmlEscape(reason)}`;
+        }
+        return `⚡ close error: ${htmlEscape(r.reason?.message || String(r.reason))}`;
+      });
+      mgmtReport += `\n\n${hardSummary.join("\n")}`;
+    }
+
+    // ── Call LLM only if non-hard actions needed ──────────────────────
     const actionPositions = positionData.filter(p => {
       const a = actionMap.get(p.position);
-      return a.action !== "STAY";
+      return a.action !== "STAY" && a?.rule !== "exit"; // hard exits already handled above
     });
 
     if (actionPositions.length > 0) {
@@ -310,7 +386,7 @@ export async function runManagementCycle({ silent = false } = {}) {
         return [
           `POSITION: ${p.pair} (${p.position})`,
           `  pool: ${p.pool}`,
-          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
+          `  action: ${act.action}${act.rule ? ` — Rule ${act.rule}: ${act.reason}` : ""}`,
           `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
           `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
@@ -322,11 +398,12 @@ MANAGEMENT ACTION REQUIRED — ${actionPositions.length} position(s)
 
 ${actionBlocks}
 
+NOTE: Stop-loss and trailing-TP exits are auto-executed before this call — you only see remaining decisions.
+
 RULES:
 - CLOSE: call close_position only — it handles fee claiming internally, do NOT call claim_fees first
 - CLAIM: call claim_fees with position address
 - INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
-- ⚡ exit alerts: close immediately, no exceptions
 
 Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
 After executing, write a brief one-line result per position.
@@ -335,7 +412,7 @@ After executing, write a brief one-line result per position.
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
 
-      mgmtReport += `\n\n${content}`;
+      mgmtReport += `\n\n${htmlEscape(stripThink(content))}`;
     } else {
       log("cron", "Management: all positions STAY — skipping LLM");
       await liveMessage?.note("No tool actions needed.");
@@ -356,11 +433,17 @@ After executing, write a brief one-line result per position.
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else sendHTML(`🔄 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
-        if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
-          notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
+        if (!p.in_range) {
+          const oorAbove = p.active_bin != null && p.upper_bin != null && p.active_bin > p.upper_bin;
+          const threshold = oorAbove
+            ? config.management.outOfRangeWaitMinutes
+            : config.management.outOfRangeBelowWaitMinutes;
+          if (p.minutes_out_of_range >= threshold) {
+            notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
+          }
         }
       }
     }
@@ -429,7 +512,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const activeStrategy = getActiveStrategy();
     const strategyBlock = activeStrategy
       ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
-      : `No active strategy — use strategy=${config.strategy.strategy}, bins_above=0, SOL only.`;
+      : `No active strategy — use strategy=${config.strategy.strategy}, bins_above=${config.strategy.binsAbove}, SOL only.`;
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
     const topCandidates = await getTopCandidates({ limit: 10 }).catch((e) => ({ _error: e.message }));
@@ -614,7 +697,7 @@ STEPS:
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    strategy = ${config.strategy.strategy} (always use this, never change it).
    bins_below = round(${config.strategy.minBinsBelow} + (volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
-   bins_above = 0. Single-side SOL only: set amount_y, keep amount_x = 0.
+   bins_above = ${config.strategy.binsAbove}. Single-side SOL only: set amount_y, keep amount_x = 0.
 3. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 
@@ -670,7 +753,7 @@ STEPS:
 IMPORTANT:
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
-      `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
+      `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 4096, {
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
@@ -692,7 +775,7 @@ IMPORTANT:
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${stripThink(screenReport)}`).catch(() => { });
       }
     }
   }
@@ -755,10 +838,8 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         if (exit) {
-          if (exit.action === "TRAILING_TP" && exit.needs_confirmation && shouldUsePnlRecheck()) {
-            if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
-              scheduleTrailingDropConfirmation(p.position);
-            }
+          if (exit.action === "TRAILING_TP_QUEUED") {
+            scheduleTrailingDropConfirmation(p.position);
             continue;
           }
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
@@ -834,6 +915,8 @@ function formatCandidates(candidates) {
 }
 
 function getDeterministicCloseRule(position, managementConfig) {
+  // "main" | "pecut" | "experimental" — governs which variant of each rule applies
+  const profile = managementConfig.closeProfile ?? "main";
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
     if (position.pnl_pct == null) return false;
@@ -845,33 +928,49 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
+  // Rule 1: Stop Loss
+  // pecut/experimental: LLM-eval path not yet implemented (R3) — falls through to main behaviour
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+    return { action: "CLOSE", rule: 1, reason: "stop loss", profile };
   }
+
+  // Rule 2: Take Profit
+  // pecut: 3s trailing confirm window (R4, not yet implemented — currently 15s for all profiles)
+  // experimental: same as pecut
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
-    return { action: "CLOSE", rule: 2, reason: "take profit" };
+    return { action: "CLOSE", rule: 2, reason: "take profit", profile };
   }
+
+  // Rule 3: Pump above range
+  // pecut/experimental: gated by minProfitPctToCloseOOR (R5 implemented)
+  // experimental: additionally PVP rivalry check (R6, not yet implemented)
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
-    position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
+    position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose + (tracked?.bin_range?.bins_above ?? 0)
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
+    if (profile === "pecut" || profile === "experimental") {
+      const minProfitGate = managementConfig.minProfitPctToCloseOOR ?? 0;
+      if (position.pnl_pct == null || position.pnl_pct < minProfitGate) {
+        log("cron_warn", `Pump-Hold: ${position.position} pumped above range but PnL ${position.pnl_pct != null ? position.pnl_pct.toFixed(2) : "?"}% < ${minProfitGate}% gate — holding (profile: ${profile})`);
+        return null;
+      }
+    }
+    return { action: "CLOSE", rule: 3, reason: "pumped far above range", profile };
   }
-  if (
-    position.active_bin != null &&
-    position.upper_bin != null &&
-    position.active_bin > position.upper_bin &&
-    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
-  ) {
-    return { action: "CLOSE", rule: 4, reason: "OOR" };
-  }
+
+  // Rule 4 (OOR Stale): owned by updatePnlAndCheckExits in state.js.
+  // Removed in R10 to eliminate duplicate engine. Trailing-armed immediate-close
+  // behavior was ported there. See state.js Rule 4 block.
+
+  // Rule 5: Low yield
+  // All profiles: respect minAgeBeforeYieldCheck (was hardcoded 60 — now configurable, R9 fix)
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= 60
+    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
   ) {
-    return { action: "CLOSE", rule: 5, reason: "low yield" };
+    return { action: "CLOSE", rule: 5, reason: "low yield", profile };
   }
   return null;
 }
@@ -882,12 +981,12 @@ function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } 
   const funnel = `GMGN funnel: ranked=${sc.ranked ?? "?"} → S1=${sc.s1 ?? "?"} → S2=${sc.s2 ?? "?"} → S3=${sc.s3 ?? "?"} → S4=${sc.s4 ?? "?"} → final=${sc.s5 ?? "?"}`;
   const byStage = {};
   for (const f of allFiltered) {
-    if (f.stage < fromStage) continue;
-    const key = `s${f.stage}`;
+    if (f.stage != null && f.stage < fromStage) continue;
+    const key = f.stage != null ? `s${f.stage}` : "sfinal";
     if (!byStage[key]) byStage[key] = [];
     byStage[key].push(`${f.name}: ${f.reason}`);
   }
-  const stageLabels = { s2: "S2 info", s3: "S3 pool", s4: "S4 indicators", s5: "S5 pick" };
+  const stageLabels = { s2: "S2 info", s3: "S3 pool", s4: "S4 indicators", s5: "S5 pick", sfinal: "S-FINAL" };
   const details = Object.entries(byStage)
     .map(([key, items]) => `${stageLabels[key] || key}:\n${items.map(r => `  • ${r}`).join("\n")}`)
     .join("\n");
@@ -962,10 +1061,10 @@ function formatConfigSnapshot() {
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
-    `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
+    `OOR: above=${config.management.outOfRangeWaitMinutes}m / below=${config.management.outOfRangeBelowWaitMinutes}m | fast-close >${config.management.outOfRangeBinsToClose} bins | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h | pump gate ${config.management.minProfitPctToCloseOOR}%`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
-    `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
-    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
+    `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m | close profile: ${config.management.closeProfile}`,
+    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl} | vol ${config.screening.minVolatility ?? 0}-${config.screening.maxVolatility ?? "∞"} | fee/tvl ${config.screening.minFeeActiveTvlRatio}-${config.screening.maxFeeActiveTvlRatio ?? "∞"}%`,
     `GMGN interval: ${config.gmgn.interval} | OrderBy: ${config.gmgn.orderBy} | Dir: ${config.gmgn.direction}`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
     `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
@@ -987,6 +1086,7 @@ function parseConfigValue(raw) {
 function settingValue(key) {
   const values = {
     solMode: config.management.solMode,
+    closeProfile: config.management.closeProfile,
     lpAgentRelayEnabled: config.api.lpAgentRelayEnabled,
     chartIndicatorsEnabled: config.indicators.enabled,
     trailingTakeProfit: config.management.trailingTakeProfit,
@@ -1020,6 +1120,10 @@ function settingValue(key) {
     gasReserve: config.management.gasReserve,
     maxPositions: config.risk.maxPositions,
     maxDeployAmount: config.risk.maxDeployAmount,
+    minVolatility: config.screening.minVolatility,
+    maxVolatility: config.screening.maxVolatility,
+    minFeeActiveTvlRatio: config.screening.minFeeActiveTvlRatio,
+    maxFeeActiveTvlRatio: config.screening.maxFeeActiveTvlRatio,
     takeProfitPct: config.management.takeProfitPct,
     stopLossPct: config.management.stopLossPct,
     trailingTriggerPct: config.management.trailingTriggerPct,
@@ -1077,7 +1181,7 @@ function renderSettingsMenu(page = "main") {
     `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
     `Screening: ${config.screening.source} | GMGN KOL ${config.gmgn.requireKol ? "required" : "preferred"}`,
     `Strategy: ${config.strategy.strategy} | deploy ${config.management.deployAmountSol} SOL | max pos ${config.risk.maxPositions}`,
-    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
+    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"} | profile: ${config.management.closeProfile} | pump gate ${config.management.minProfitPctToCloseOOR}%`,
     `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
   ].join("\n");
 
@@ -1111,6 +1215,7 @@ function renderSettingsMenu(page = "main") {
       inputButton("maxDeployAmount", "Max SOL"),
       inputButton("takeProfitPct", "TP %"),
       inputButton("stopLossPct", "SL %"),
+      inputButton("minProfitPctToCloseOOR", "Min profit % to close on pump", { digits: 2 }),
       [toggleButton("trailingTakeProfit", "Trailing TP")],
       inputButton("trailingTriggerPct", "Trail trigger", { digits: 1 }),
       inputButton("trailingDropPct", "Trail drop", { digits: 1 }),
@@ -1118,6 +1223,15 @@ function renderSettingsMenu(page = "main") {
       inputButton("repeatDeployCooldownTriggerCount", "Repeat count"),
       inputButton("repeatDeployCooldownHours", "Repeat hrs"),
       inputButton("repeatDeployCooldownMinFeeEarnedPct", "Min fee earned %", { digits: 1 }),
+      inputButton("minVolatility", "Min vol", { digits: 1 }),
+      inputButton("maxVolatility", "Max vol", { digits: 1 }),
+      inputButton("minFeeActiveTvlRatio", "Min fee/TVL %", { digits: 2 }),
+      inputButton("maxFeeActiveTvlRatio", "Max fee/TVL %", { digits: 2 }),
+      [
+        settingButton(`Close: main${config.management.closeProfile === "main" ? " ✓" : ""}`, "cfg:set:closeProfile:main"),
+        settingButton(`pecut${config.management.closeProfile === "pecut" ? " ✓" : ""}`, "cfg:set:closeProfile:pecut"),
+        settingButton(`experimental${config.management.closeProfile === "experimental" ? " ✓" : ""}`, "cfg:set:closeProfile:experimental"),
+      ],
     ];
   } else if (page === "screen") {
     rows = [
@@ -1299,6 +1413,8 @@ async function applySettingsMenuCallback(msg) {
     if (key === "repeatDeployCooldownHours") value = Math.max(0, Math.round(value));
     if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
     if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
+    if (key === "minVolatility") value = Math.max(0, Math.min(10, Number((current + delta).toFixed(1))));
+    if (key === "maxVolatility") value = Math.max(1, Math.min(20, Number((current + delta).toFixed(1))));
   } else if (action === "set") {
     value = normalizeMenuValue(key, parts.slice(3).join(":"));
   } else {
@@ -1329,6 +1445,297 @@ async function applySettingsMenuCallback(msg) {
   await showSettingsMenu({ messageId: msg.messageId, page });
 }
 
+function categorizeCloseReason(reason) {
+  if (!reason) return "Other";
+  const r = reason.toLowerCase();
+  if (r.includes("trailing tp") && (r.includes("oor") || r.includes("trailing armed"))) return "Trailing TP (OOR)";
+  if (r.includes("trailing tp")) return "Trailing TP";
+  if (r.includes("low yield")) return "Low yield";
+  if (r.includes("stop loss")) return "Stop loss";
+  if (r.includes("rule 3") || r.includes("pumped")) return "Pump (R3)";
+  if (r.includes("take profit")) return "Take profit";
+  if (r.includes("oor") || r.includes("out of range")) return "OOR";
+  if (r.includes("manual")) return "Manual";
+  return "Other";
+}
+
+async function parseLogDates(dates) {
+  const logsDir = new URL("./logs", import.meta.url).pathname;
+  const closedPositions = [], exitAlerts = [];
+  let errorCount = 0, safetyLockCount = 0, pumpHoldCount = 0;
+  for (const dateStr of dates) {
+    try {
+      const rl = readline.createInterface({ input: createReadStream(`${logsDir}/agent-${dateStr}.log`), crlfDelay: Infinity });
+      for await (const line of rl) {
+        const m = line.match(/\[PnL poll\] Exit alert: (\S+) — (.+?) — triggering/);
+        if (m) { const tsM = line.match(/\[(\d{4}-\d{2}-\d{2}T[^\]]+)\]/); exitAlerts.push({ ts: tsM?.[1] ?? dateStr, pair: m[1], reason: m[2] }); }
+        if (/\[ERROR\]/.test(line)) errorCount++;
+        if (/Safety-Lock:/.test(line)) safetyLockCount++;
+        if (/Pump-Hold:/.test(line)) pumpHoldCount++;
+      }
+    } catch {}
+    try {
+      const rl = readline.createInterface({ input: createReadStream(`${logsDir}/actions-${dateStr}.jsonl`), crlfDelay: Infinity });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line);
+          if (entry.tool === "close_position" && entry.success !== false) {
+            const result = typeof entry.result === "string"
+              ? (() => { try { return JSON.parse(entry.result); } catch { return {}; } })()
+              : (entry.result ?? {});
+            closedPositions.push({ ts: entry.timestamp, pair: result.pool_name ?? "?", reason: entry.args?.reason ?? "?", pnl_pct: result.pnl_pct ?? null, pnl_usd: result.pnl_usd ?? null });
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+  return { closedPositions, exitAlerts, errorCount, safetyLockCount, pumpHoldCount };
+}
+
+async function buildObserveReport({ days = 1, details = false } = {}) {
+  const now = new Date();
+  const dates = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(now); d.setDate(d.getDate() - i);
+    dates.push(d.toISOString().slice(0, 10));
+  }
+
+  const { closedPositions, exitAlerts, errorCount, safetyLockCount, pumpHoldCount } = await parseLogDates(dates);
+
+  const oorAlerts = exitAlerts.filter(a => /oor|out.of.range/i.test(a.reason));
+  const oorAbove  = exitAlerts.filter(a => /OOR above/i.test(a.reason));
+  const oorBelow  = exitAlerts.filter(a => /OOR below/i.test(a.reason));
+  const trailingArmedClosed = closedPositions.filter(p => /trailing armed|Trailing TP: OOR/i.test(p.reason));
+
+  const cats = {};
+  for (const p of closedPositions) { const cat = categorizeCloseReason(p.reason); cats[cat] = (cats[cat] ?? 0) + 1; }
+
+  const profile = config.management.closeProfile ?? "main";
+  const label = days === 1 ? "today" : `last ${days}d`;
+
+  const lines = [`<b>📡 Observe — ${label} | profile: ${profile}</b>`, "", `<b>Closes: ${closedPositions.length}</b>`];
+  if (Object.keys(cats).length > 0) {
+    for (const [cat, n] of Object.entries(cats).sort((a, b) => b[1] - a[1])) lines.push(`  ${cat}: ${n}`);
+  } else {
+    lines.push("  No closes recorded.");
+  }
+
+  lines.push(
+    "", `<b>OOR exit alerts: ${oorAlerts.length}</b>`,
+    `  Above: ${oorAbove.length}`, `  Below: ${oorBelow.length}`,
+    `  Trailing-armed closes: ${trailingArmedClosed.length}`,
+    `  Safety-Lock holds: ${safetyLockCount}`, `  Pump-Hold holds: ${pumpHoldCount}`,
+  );
+
+  if (errorCount > 0) lines.push("", `⚠️ Errors in log: ${errorCount}`);
+
+  if (details) {
+    lines.push("");
+    if (trailingArmedClosed.length > 0) {
+      lines.push("<b>Trailing-armed OOR closes</b>");
+      trailingArmedClosed.slice(-10).forEach((p) => {
+        const pnl = p.pnl_pct != null ? ` | ${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "";
+        const usd = p.pnl_usd != null ? ` (${p.pnl_usd >= 0 ? "+" : ""}$${Math.abs(p.pnl_usd).toFixed(3)})` : "";
+        lines.push(`  ${htmlEscape(p.pair)}${pnl}${usd}`);
+        lines.push(`  <i>${htmlEscape(p.reason.slice(0, 90))}</i>`);
+      });
+    } else {
+      lines.push("No trailing-armed OOR closes found.");
+    }
+  }
+
+  return lines.join("\n");
+}
+
+async function buildObserveCompare(baselineDays = null, currentDays = null) {
+  const logsDir = new URL("./logs", import.meta.url).pathname;
+  const now = new Date();
+
+  // Scan up to 14d back for most recent closeProfile change in agent logs
+  let boundaryTs = null, fromProfile = null, toProfile = null;
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(now); d.setDate(d.getDate() - i);
+    const dateStr = d.toISOString().slice(0, 10);
+    try {
+      const rl = readline.createInterface({ input: createReadStream(`${logsDir}/agent-${dateStr}.log`), crlfDelay: Infinity });
+      for await (const line of rl) {
+        const m = line.match(/update_config: config\.management\.closeProfile (\S+) \S+ (\S+) \(/);
+        if (m) {
+          const tsM = line.match(/\[(\d{4}-\d{2}-\d{2}T[^\]]+)\]/);
+          const ts = tsM?.[1];
+          if (ts && (!boundaryTs || ts > boundaryTs)) { boundaryTs = ts; fromProfile = m[1]; toProfile = m[2]; }
+        }
+      }
+    } catch {}
+  }
+
+  // Compute period sizes
+  let curDays, baseDays;
+  if (boundaryTs) {
+    const msSince = now.getTime() - new Date(boundaryTs).getTime();
+    const defaultCur = Math.max(1, Math.min(Math.ceil(msSince / 86400000), 7));
+    curDays  = currentDays  ?? defaultCur;
+    baseDays = baselineDays ?? Math.max(2, curDays * 2);
+  } else {
+    curDays  = currentDays  ?? 2;
+    baseDays = baselineDays ?? 4;
+  }
+
+  function buildDates(skip, count) {
+    const d = [];
+    for (let i = skip; i < skip + count; i++) { const x = new Date(now); x.setDate(x.getDate() - i); d.push(x.toISOString().slice(0, 10)); }
+    return d;
+  }
+
+  const [cur, base] = await Promise.all([
+    parseLogDates(buildDates(0, curDays)),
+    parseLogDates(buildDates(curDays, baseDays)),
+  ]);
+
+  function cats(positions) {
+    const c = {};
+    for (const p of positions) { const cat = categorizeCloseReason(p.reason); c[cat] = (c[cat] ?? 0) + 1; }
+    return c;
+  }
+  const bc = cats(base.closedPositions), cc = cats(cur.closedPositions);
+  const allCats = [...new Set([...Object.keys(bc), ...Object.keys(cc)])].sort();
+
+  const COL1 = 18, COL2 = 10, COL3 = 10;
+  function row(label, b, c) {
+    return label.padEnd(COL1) + (b == null ? "n/a" : String(b)).padStart(COL2) + (c == null ? "n/a" : String(c)).padStart(COL3);
+  }
+  const SEP = "─".repeat(COL1 + COL2 + COL3);
+
+  const avgBase = (base.closedPositions.length / baseDays).toFixed(1);
+  const avgCur  = (cur.closedPositions.length  / curDays).toFixed(1);
+
+  const header = boundaryTs
+    ? `<b>📊 Compare</b>\nBoundary: ${boundaryTs.slice(0, 16).replace("T", " ")} UTC (${fromProfile} → ${toProfile})`
+    : `<b>📊 Compare</b>\nNo profile change found — ${curDays}d vs prior ${baseDays}d`;
+
+  const tableLines = [
+    row("", `Base (${baseDays}d)`, `Cur (${curDays}d)`), SEP,
+    row("Closes total", base.closedPositions.length, cur.closedPositions.length),
+    ...allCats.map(cat => row("  " + cat, bc[cat] ?? 0, cc[cat] ?? 0)),
+    SEP,
+    row("Safety-Lock holds", null, cur.safetyLockCount),
+    row("Pump-Hold holds", null, cur.pumpHoldCount),
+    row("Errors", base.errorCount, cur.errorCount),
+    row("Profile", fromProfile ?? "main", toProfile ?? (config.management.closeProfile ?? "main")),
+    row("Avg closes/day", avgBase, avgCur),
+  ];
+
+  return `${header}\n\n<code>${tableLines.join("\n")}</code>`;
+}
+
+async function buildObserveHeld() {
+  const logsDir = new URL("./logs", import.meta.url).pathname;
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+  const holdsByAddr = new Map();
+
+  const today     = now.toISOString().slice(0, 10);
+  const yesterday = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+
+  for (const dateStr of [yesterday, today]) {
+    try {
+      const rl = readline.createInterface({ input: createReadStream(`${logsDir}/agent-${dateStr}.log`), crlfDelay: Infinity });
+      for await (const line of rl) {
+        const tsM = line.match(/\[(\d{4}-\d{2}-\d{2}T[^\]]+)\]/);
+        const ts = tsM?.[1];
+        if (!ts || ts < cutoff) continue;
+
+        const sl = line.match(/Safety-Lock: (\S+) OOR (above|below) for (\d+)m but PnL (-?[\d.]+|\?)% .+ holding \(profile: (\S+)\)/);
+        if (sl) {
+          const [, addr, dir, mins, pnl, prof] = sl;
+          const existing = holdsByAddr.get(addr);
+          if (!existing || ts > existing.ts)
+            holdsByAddr.set(addr, { type: "Safety-Lock", direction: dir, minutesOOR: parseInt(mins), pnl: pnl === "?" ? null : parseFloat(pnl), ts, prof });
+        }
+
+        const ph = line.match(/Pump-Hold: (\S+) pumped above range but PnL (-?[\d.]+|\?)% < ([\d.]+)% gate .+ holding \(profile: (\S+)\)/);
+        if (ph) {
+          const [, addr, pnlRaw, gate, prof] = ph;
+          const existing = holdsByAddr.get(addr);
+          if (!existing || ts > existing.ts)
+            holdsByAddr.set(addr, { type: "Pump-Hold", gate: parseFloat(gate), pnl: pnlRaw === "?" ? null : parseFloat(pnlRaw), ts, prof });
+        }
+      }
+    } catch {}
+  }
+
+  if (holdsByAddr.size === 0) return `<b>🔒 Held positions — last 24h</b>\n\nNo held positions in last 24h.`;
+
+  function fmtAddr(a) { return a.length > 8 ? `${a.slice(0, 4)}…${a.slice(-4)}` : a; }
+  function fmtTime(ts) { return ts.slice(11, 16); }
+
+  const lines = [`<b>🔒 Held positions — last 24h</b>`, ""];
+  const slEntries = [...holdsByAddr.entries()].filter(([, v]) => v.type === "Safety-Lock");
+  const phEntries = [...holdsByAddr.entries()].filter(([, v]) => v.type === "Pump-Hold");
+
+  if (slEntries.length > 0) {
+    lines.push(`<b>Safety-Lock (${slEntries.length}):</b>`);
+    for (const [addr, h] of slEntries.slice(0, 20)) {
+      const pnlStr = h.pnl != null ? `PnL ${h.pnl.toFixed(2)}%` : "PnL ?%";
+      lines.push(`• <code>${fmtAddr(addr)}</code> — OOR ${h.direction} ${h.minutesOOR}m, ${pnlStr}, last hold ${fmtTime(h.ts)}`);
+    }
+    if (slEntries.length > 20) lines.push(`  … and ${slEntries.length - 20} more`);
+  }
+
+  if (phEntries.length > 0) {
+    if (slEntries.length > 0) lines.push("");
+    lines.push(`<b>Pump-Hold (${phEntries.length}):</b>`);
+    for (const [addr, h] of phEntries.slice(0, 20)) {
+      const pnlStr = h.pnl != null ? `PnL ${h.pnl.toFixed(2)}%` : "PnL ?%";
+      lines.push(`• <code>${fmtAddr(addr)}</code> — pumped above range, ${pnlStr} < ${h.gate}% gate, last hold ${fmtTime(h.ts)}`);
+    }
+    if (phEntries.length > 20) lines.push(`  … and ${phEntries.length - 20} more`);
+  }
+
+  lines.push("", `Total: ${holdsByAddr.size} unique position${holdsByAddr.size !== 1 ? "s" : ""} held`);
+  return lines.join("\n");
+}
+
+async function buildObserveReasons() {
+  const today = new Date().toISOString().slice(0, 10);
+  const { closedPositions, safetyLockCount, pumpHoldCount } = await parseLogDates([today]);
+  const profile = config.management.closeProfile ?? "main";
+
+  if (closedPositions.length === 0)
+    return `<b>🚪 Close reasons — today (${today})</b>\nProfile: ${profile}\n\nNo closes today.`;
+
+  const cats = {};
+  for (const p of closedPositions) { const cat = categorizeCloseReason(p.reason); cats[cat] = (cats[cat] ?? 0) + 1; }
+  const total = closedPositions.length;
+  const sorted = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+  const maxCount = sorted[0][1];
+  const BAR_MAX = 14;
+
+  function bar(n) {
+    const frac = n / maxCount;
+    const full = Math.floor(frac * BAR_MAX);
+    const half = (frac * BAR_MAX - full) >= 0.4 && full < BAR_MAX ? 1 : 0;
+    return "█".repeat(full) + (half ? "▌" : "");
+  }
+
+  const lines = [`<b>🚪 Close reasons — today (${today})</b>`, `Profile: ${profile} | Total closes: ${total}`, ""];
+  for (const [cat, n] of sorted) {
+    const pct = ((n / total) * 100).toFixed(1);
+    lines.push(`<code>${cat.padEnd(18)} ${bar(n).padEnd(BAR_MAX + 1)}${n}  (${pct}%)</code>`);
+  }
+
+  if (safetyLockCount > 0 || pumpHoldCount > 0) {
+    lines.push("", "<b>Holds (no close):</b>");
+    if (safetyLockCount > 0)
+      lines.push(`<code>${"Safety-Lock".padEnd(18)} ${bar(safetyLockCount).padEnd(BAR_MAX + 1)}${safetyLockCount}</code>`);
+    if (pumpHoldCount > 0)
+      lines.push(`<code>${"Pump-Hold".padEnd(18)} ${bar(pumpHoldCount).padEnd(BAR_MAX + 1)}${pumpHoldCount}</code>`);
+  }
+
+  return lines.join("\n");
+}
+
 function formatHelpText() {
   return [
     "Telegram commands",
@@ -1337,14 +1744,27 @@ function formatHelpText() {
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
     "/positions — list open positions",
+    "/history — last 10 closed positions",
+    "/learn — performance summary + recent lessons",
+    "/observe — exit rule snapshot: reasons, OOR counts, active profile",
+    "/observe <N> — same aggregated over last N days (max 7)",
+    "/observe details — trailing-armed OOR closes with pair + PnL",
+    "/observe compare — close distribution: baseline vs current period",
+    "/observe compare <B> <C> — baseline B days vs current C days",
+    "/observe held — positions held by Safety-Lock or Pump-Hold (last 24h)",
+    "/observe reasons — bar chart of close reasons today",
     "/pool <n> — detailed info for one open position",
     "/close <n> — close one position by index",
     "/closeall — close all open positions",
     "/set <n> <note> — set note/instruction on position",
+    "/cooldown <symbol> <hours> — manually block a token (e.g. /cooldown BELKA 4)",
+    "/uncooldown <symbol> — clear manual cooldown for a token",
+    "/blockdeploy <pool|mint|wallet> [reason] — block a deployer wallet (no arg = list)",
+    "/unblockdeploy <wallet> — remove deployer from blocklist",
     "/config — show important runtime config",
     "/settings — button menu for common config",
     "/setcfg <key> <value> — update persisted config",
-    "/screen — refresh deterministic candidate list",
+    "/screen — run full screening cycle (enrich + LLM pick + deploy)",
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
@@ -1353,6 +1773,9 @@ function formatHelpText() {
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
     "/stop — shut down agent",
+    "",
+    "/myid — show your Telegram user ID",
+    "/lockuser — lock bot to your account only",
   ].join("\n");
 }
 
@@ -1389,7 +1812,7 @@ async function deployLatestCandidate(index) {
     amount_y: deployAmount,
     strategy: config.strategy.strategy,
     bins_below: binsBelow,
-    bins_above: 0,
+    bins_above: config.strategy.binsAbove,
     pool_name: candidate.name,
     base_mint: candidate.base?.mint || candidate.base_mint || null,
     bin_step: candidate.bin_step,
@@ -1420,6 +1843,46 @@ function refreshPrompt() {
   _ttyInterface.prompt(true);
 }
 
+async function resolveDeployerForBlock(input) {
+  // Try pool-memory: input might be a pool address with a known base_mint
+  let mint = null;
+  let label = null;
+  let source = "input";
+  try {
+    const pm = getPoolMemory({ pool_address: input });
+    if (pm && !pm.error && pm.base_mint) {
+      mint = pm.base_mint;
+      label = pm.name || null;
+      source = "pool";
+    }
+  } catch {}
+
+  // If no pool match, treat input as a possible mint and ask Jupiter
+  const queryMint = mint || input;
+  let dev = null;
+  try {
+    const res = await fetch(`https://datapi.jup.ag/v1/assets/search?query=${encodeURIComponent(queryMint)}`);
+    if (res.ok) {
+      const data = await res.json();
+      const t = Array.isArray(data) ? data[0] : data?.[0] || data;
+      if (t?.dev) {
+        dev = t.dev;
+        if (!label && t.symbol) label = t.symbol;
+        if (source === "input" && mint) source = "pool";
+        else if (source === "input") source = "mint";
+      }
+    }
+  } catch {}
+
+  if (dev) return { wallet: dev, label, source };
+
+  // Last resort: assume input is already a wallet (operator typed wallet directly)
+  // We can't auto-derive a label here, so leave label null.
+  if (!mint) return { wallet: input, label: null, source: "input" };
+
+  return { wallet: null, error: `Pool ${input} resolved to mint ${mint} but Jupiter has no dev field for it.` };
+}
+
 async function drainTelegramQueue() {
   while (_telegramQueue.length > 0 && !_managementBusy && !_screeningBusy && !busy) {
     const queued = _telegramQueue.shift();
@@ -1444,7 +1907,7 @@ async function telegramHandler(msg) {
         return;
       }
     }
-    const result = await executeTool("update_config", { changes: { [key]: value }, reason: "Telegram input field" });
+    const result = await executeTool("update_config", { changes: { [key]: value }, reason: "Telegram settings menu" });
     if (!result?.success) {
       await sendMessage(`Failed to update ${key}.`);
       return;
@@ -1464,6 +1927,27 @@ async function telegramHandler(msg) {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
+
+  if (text === "/myid") {
+    const uid = msg.from?.id;
+    await sendMessage(uid
+      ? `Your Telegram user ID is: ${uid}\n\nSend /lockuser to lock the bot to your account only.`
+      : "Could not determine your user ID."
+    ).catch(() => {});
+    return;
+  }
+
+  if (text === "/lockuser") {
+    const uid = msg.from?.id;
+    if (!uid) {
+      await sendMessage("Could not determine your user ID.").catch(() => {});
+      return;
+    }
+    saveAllowedUserId(uid);
+    await sendMessage(`Bot locked to user ID ${uid}. Only you can send commands now.`).catch(() => {});
+    return;
+  }
+
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
@@ -1507,19 +1991,167 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text === "/history") {
+    try {
+      const deploys = getRecentDeploys(10);
+      if (!deploys.length) { await sendHTML("No closed positions yet."); return; }
+      function timeAgo(iso) {
+        if (!iso) return "—";
+        const mins = Math.floor((Date.now() - new Date(iso)) / 60000);
+        if (mins < 60) return `${mins}m ago`;
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24) return `${hrs}h ago`;
+        return `${Math.floor(hrs / 24)}d ago`;
+      }
+      function fmtSigned(val, decimals, prefix) {
+        if (val == null) return null;
+        const sign = val >= 0 ? "+" : "-";
+        return `${sign}${prefix}${Math.abs(val).toFixed(decimals)}`;
+      }
+      const lines = deploys.map((d, i) => {
+        const pnlPct = d.pnl_pct ?? 0;
+        const pnlEmoji = pnlPct >= 0 ? "🟢" : "🔴";
+        const pnlSign = pnlPct >= 0 ? "+" : "";
+        // PnL: show SOL if available, always show USD
+        const pnlSolStr = d.pnl_sol != null ? fmtSigned(d.pnl_sol, 4, "◎") : null;
+        const pnlUsdStr = fmtSigned(d.pnl_usd ?? 0, 2, "$");
+        const pnlAmounts = [pnlSolStr, pnlUsdStr].filter(Boolean).join(" / ");
+        // Fees: show both SOL and USD when available
+        const feeSolStr = d.fees_earned_sol != null ? `◎${d.fees_earned_sol.toFixed(4)}` : null;
+        const feeUsdStr = d.fees_earned_usd != null ? `$${d.fees_earned_usd.toFixed(2)}` : null;
+        const feeStr = [feeSolStr, feeUsdStr].filter(Boolean).join(" / ") || "—";
+        const held = d.minutes_held != null ? `${d.minutes_held}m` : "—";
+        const reason = htmlEscape(d.close_reason || "?");
+        return `${i + 1}. <b>${htmlEscape(d.pool_name)}</b> ${pnlEmoji} ${pnlSign}${pnlPct.toFixed(2)}% (${pnlAmounts}) | 📥 ${feeStr} | ⏱ ${held} | ${timeAgo(d.closed_at)}`;
+      });
+      const wins = deploys.filter((d) => (d.pnl_pct ?? 0) >= 0).length;
+      const avgPnl = deploys.reduce((s, d) => s + (d.pnl_pct ?? 0), 0) / deploys.length;
+      const avgSign = avgPnl >= 0 ? "+" : "";
+      const totalFeesSol = deploys.reduce((s, d) => s + (d.fees_earned_sol ?? 0), 0);
+      const totalFeesUsd = deploys.reduce((s, d) => s + (d.fees_earned_usd ?? 0), 0);
+      await sendHTML(
+        `<b>📋 Last ${deploys.length} Closed Positions</b>\n\n` +
+        lines.join("\n") +
+        `\n\nWin rate: ${wins}/${deploys.length} (${Math.round(wins / deploys.length * 100)}%) | Avg PnL: ${avgSign}${avgPnl.toFixed(2)}%` +
+        `\nTotal fees: ◎${totalFeesSol.toFixed(4)} / $${totalFeesUsd.toFixed(2)}`
+      );
+    } catch (e) { await sendHTML(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  if (text === "/learn") {
+    try {
+      const perf = getPerformanceSummary();
+      const { lessons } = listLessons({ limit: 8 });
+      const lines = [];
+      if (perf) {
+        const pnlSign = perf.total_pnl_usd >= 0 ? "+" : "";
+        lines.push(
+          `<b>📊 Performance Summary</b>`,
+          `Closed: ${perf.total_positions_closed} | Win rate: ${perf.win_rate_pct}% | Avg PnL: ${perf.avg_pnl_pct >= 0 ? "+" : ""}${perf.avg_pnl_pct}%`,
+          `Total PnL: ${pnlSign}$${perf.total_pnl_usd} | Range efficiency: ${perf.avg_range_efficiency_pct}%`,
+          `Lessons stored: ${perf.total_lessons}`,
+        );
+      } else {
+        lines.push("<b>📊 Performance Summary</b>", "No closed positions recorded yet.");
+      }
+      if (lessons.length > 0) {
+        lines.push("", "<b>🧠 Recent Lessons</b>");
+        lessons.slice(-8).reverse().forEach((l, i) => {
+          const pin = l.pinned ? "📌 " : "";
+          const tag = l.tags?.length ? ` [${l.tags.join(", ")}]` : "";
+          lines.push(`${i + 1}. ${pin}${htmlEscape(l.rule)}${tag}`);
+        });
+      } else {
+        lines.push("", "No lessons recorded yet.");
+      }
+      await sendHTML(lines.join("\n"));
+    } catch (e) { await sendHTML(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  if (text === "/observeheld") {
+    try { await sendHTML(await buildObserveHeld()); } catch (e) { await sendHTML(`Error: ${htmlEscape(e.message)}`).catch(() => {}); }
+    return;
+  }
+  if (text === "/observereasons") {
+    try { await sendHTML(await buildObserveReasons()); } catch (e) { await sendHTML(`Error: ${htmlEscape(e.message)}`).catch(() => {}); }
+    return;
+  }
+  if (text === "/observecompare" || text.startsWith("/observecompare ")) {
+    try {
+      const parts = text.slice("/observecompare".length).trim().split(/\s+/).map(Number).filter(n => Number.isFinite(n) && n > 0);
+      await sendHTML(await buildObserveCompare(parts[0] ?? null, parts[1] ?? null));
+    } catch (e) { await sendHTML(`Error: ${htmlEscape(e.message)}`).catch(() => {}); }
+    return;
+  }
+  if (text === "/observe" || text.startsWith("/observe ")) {
+    try {
+      const arg = text.slice("/observe".length).trim();
+      let report;
+      if (arg === "compare" || arg.startsWith("compare ")) {
+        const parts = arg.slice("compare".length).trim().split(/\s+/).map(Number).filter(n => Number.isFinite(n) && n > 0);
+        report = await buildObserveCompare(parts[0] ?? null, parts[1] ?? null);
+      } else if (arg === "held") {
+        report = await buildObserveHeld();
+      } else if (arg === "reasons") {
+        report = await buildObserveReasons();
+      } else if (arg === "details") {
+        report = await buildObserveReport({ days: 1, details: true });
+      } else {
+        const n = parseInt(arg, 10);
+        report = await buildObserveReport({ days: Number.isFinite(n) && n >= 1 ? Math.min(n, 7) : 1 });
+      }
+      await sendHTML(report);
+    } catch (e) {
+      await sendHTML(`Error: ${htmlEscape(e.message)}`).catch(() => {});
+    }
+    return;
+  }
+
   if (text === "/positions") {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
-      if (total_positions === 0) { await sendMessage("No open positions."); return; }
+      if (total_positions === 0) { await sendHTML("No open positions."); return; }
       const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+
+      const blocks = positions.map((p, i) => {
+        const pnlSign = (p.pnl_pct ?? 0) >= 0 ? "+" : "";
+        const pnlPctStr = `${pnlSign}${(p.pnl_pct ?? 0).toFixed(1)}%`;
+        const pnlEmoji = (p.pnl_pct ?? 0) >= 0 ? "🟢" : "🔴";
+        const range = fmtRangeBar(p.active_bin, p.lower_bin, p.upper_bin);
+        const rangeEmoji = range.oor ? "🔴" : "🟢";
+        const rangeLabel = range.oor
+          ? `${range.bar} bin ${p.active_bin} (${range.oor} ${p.lower_bin}–${p.upper_bin})`
+          : `${range.bar} ${range.pct}% (bin ${p.active_bin}/${p.lower_bin}–${p.upper_bin})`;
+        const pnlUsdStr = (p.pnl_usd ?? 0) >= 0 ? `+${cur}${(p.pnl_usd ?? 0).toFixed(3)}` : `-${cur}${(Math.abs(p.pnl_usd) ?? 0).toFixed(3)}`;
+        const ageStr = p.age_minutes != null ? `${p.age_minutes}m` : "—m";
+        const feeStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%/24h` : "—";
+        const rangeLine = p.in_range
+          ? "🟢 IN"
+          : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+        const valueStr = `${cur}${(p.total_value_usd ?? 0).toFixed(3)}`;
+        const unclaimedStr = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(3)}`;
+        const noteLine = p.instruction ? `\n   📝 "${p.instruction}"` : "";
+
+        return [
+          `📊 <b>${i + 1}. ${p.pair}</b> | ${p.strategy ?? "spot"}`,
+          `   💰 ${valueStr} | PnL: ${pnlEmoji} ${pnlPctStr} (${pnlUsdStr}) | Range: ${rangeEmoji} ${rangeLabel} | 📥 ${unclaimedStr} | 📈 ${feeStr}`,
+          `   ${rangeLine} | ⏱ ${ageStr}${noteLine}`,
+        ].join("\n");
       });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+
+      const totalValue = positions.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
+      const avgPnl = positions.reduce((s, p) => s + (p.pnl_pct ?? 0), 0) / (positions.length || 1);
+      const avgSign = avgPnl >= 0 ? "+" : "";
+      const summary = `📦 ${total_positions} positions | 💵 Total: ${cur}${totalValue.toFixed(3)} | 📊 Avg PnL: ${avgSign}${avgPnl.toFixed(2)}%`;
+
+      await sendHTML(
+        `<b>📊 Open Positions (${total_positions})</b>\n\n` +
+        blocks.join("\n\n") +
+        `\n\n${summary}\n\n/close &lt;n&gt; to close | /set &lt;n&gt; &lt;note&gt; to set instruction`
+      );
+    } catch (e) { await sendHTML(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
 
@@ -1587,6 +2219,38 @@ async function telegramHandler(msg) {
     return;
   }
 
+  const cooldownMatch = text.match(/^\/cooldown\s+(\S+)\s+(\d+(?:\.\d+)?)$/i);
+  if (cooldownMatch) {
+    try {
+      const { setManualCooldown } = await import("./pool-cooldown.js");
+      const symbol = cooldownMatch[1].trim();
+      const hours = parseFloat(cooldownMatch[2]);
+      const result = setManualCooldown(symbol, hours);
+      if (!result.found) {
+        await sendMessage(`❌ No pool history found for <b>${symbol}</b>.\nToken must have been deployed before to appear in pool memory.`).catch(() => {});
+      } else {
+        const until = new Date(Date.now() + hours * 60 * 60 * 1000).toLocaleString("en-US", { timeZone: "UTC", hour12: false });
+        await sendMessage(`⏸ Cooldown set for <b>${symbol}</b> — ${hours}h\nUntil: ${until} UTC\nPools: ${result.pools.join(", ")}`).catch(() => {});
+      }
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  const uncooldownMatch = text.match(/^\/uncooldown\s+(\S+)$/i);
+  if (uncooldownMatch) {
+    try {
+      const { clearManualCooldown } = await import("./pool-cooldown.js");
+      const symbol = uncooldownMatch[1].trim();
+      const result = clearManualCooldown(symbol);
+      if (!result.found) {
+        await sendMessage(`❌ No pool history found for <b>${symbol}</b>.`).catch(() => {});
+      } else {
+        await sendMessage(`✅ Cooldown cleared for <b>${symbol}</b>\nPools: ${result.pools.join(", ")}`).catch(() => {});
+      }
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
   const setMatch = text.match(/^\/set\s+(\d+)\s+(.+)$/i);
   if (setMatch) {
     try {
@@ -1621,9 +2285,57 @@ async function telegramHandler(msg) {
     return;
   }
 
+  const blockDeployMatch = text.match(/^\/blockdeploy(?:\s+(\S+)(?:\s+(.+))?)?$/i);
+  if (blockDeployMatch) {
+    try {
+      const input = blockDeployMatch[1];
+      if (!input) {
+        const list = listBlockedDevs();
+        if (!list.count) {
+          await sendMessage("No deployers blocked.\n\nUsage: /blockdeploy <pool|mint|wallet> [reason]").catch(() => {});
+          return;
+        }
+        const lines = list.blocked_devs.map((e, i) => `${i + 1}. ${e.label || "?"} | ${e.wallet}\n   ${e.reason || "no reason"}`);
+        await sendMessage(`Blocked deployers (${list.count}):\n\n${lines.join("\n")}`).catch(() => {});
+        return;
+      }
+      const reason = blockDeployMatch[2]?.trim() || "manual block via /blockdeploy";
+      const resolved = await resolveDeployerForBlock(input);
+      if (!resolved.wallet) {
+        await sendMessage(`Couldn't resolve deployer from "${input}".\n${resolved.error || ""}`.trim()).catch(() => {});
+        return;
+      }
+      const result = blockDev({ wallet: resolved.wallet, reason, label: resolved.label });
+      if (result.already_blocked) {
+        await sendMessage(`⚠️ Already blocked: ${resolved.label || resolved.wallet}\nReason: ${result.reason}`).catch(() => {});
+        return;
+      }
+      const sourceNote = resolved.source === "input" ? "" : `\nResolved from ${resolved.source}: ${input}`;
+      await sendMessage(`✅ Blocked deployer ${resolved.label || resolved.wallet}\nWallet: ${resolved.wallet}\nReason: ${reason}${sourceNote}`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  const unblockDeployMatch = text.match(/^\/unblockdeploy\s+(\S+)$/i);
+  if (unblockDeployMatch) {
+    try {
+      const result = unblockDev({ wallet: unblockDeployMatch[1] });
+      if (result.error) {
+        await sendMessage(`❌ ${result.error}`).catch(() => {});
+        return;
+      }
+      await sendMessage(`✅ Unblocked ${result.was?.label || result.wallet}\nWallet: ${result.wallet}`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
   if (text === "/screen") {
     try {
-      await sendMessage(await runDeterministicScreen(5)).catch(() => {});
+      await runScreeningCycle();
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1831,7 +2543,8 @@ Commands:
   1 / 2 / 3 ...  Deploy ${DEPLOY} SOL into that pool
   auto           Let the agent pick and deploy automatically
   /status        Refresh wallet + positions
-  /candidates    Refresh top pool list
+  /screen        Run full screening cycle (enrich + LLM pick + deploy)
+  /candidates    Refresh top pool list (no LLM, no deploy)
   /briefing      Show morning briefing (last 24h)
   /learn         Study top LPers from the best current pool and save lessons
   /learn <addr>  Study top LPers from a specific pool address
@@ -1909,6 +2622,15 @@ Commands:
       await runBusy(async () => {
         const briefing = await generateBriefing();
         console.log(`\n${briefing.replace(/<[^>]*>/g, "")}\n`);
+      });
+      return;
+    }
+
+    if (input === "/screen") {
+      await runBusy(async () => {
+        console.log("\nRunning full screening cycle...\n");
+        const report = await runScreeningCycle();
+        if (report) console.log(`\n${stripThink(report)}\n`);
       });
       return;
     }

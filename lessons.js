@@ -63,7 +63,8 @@ function save(data) {
  * @param {number} perf.fee_tvl_ratio  - fee/TVL ratio at deploy time
  * @param {number} perf.organic_score  - Token organic score at deploy time
  * @param {number} perf.amount_sol     - Amount deployed
- * @param {number} perf.fees_earned_usd - Total fees earned
+ * @param {number} perf.fees_earned_usd - Total fees earned (USD)
+ * @param {number} perf.fees_earned_sol - Total fees earned (SOL)
  * @param {number} perf.final_value_usd - Value when closed
  * @param {number} perf.initial_value_usd - Value when opened
  * @param {number} perf.minutes_in_range  - Total minutes position was in range
@@ -90,9 +91,18 @@ export async function recordPerformance(perf) {
   }
 
   const pnl_usd = (perf.final_value_usd + perf.fees_earned_usd) - perf.initial_value_usd;
-  const pnl_pct = perf.initial_value_usd > 0
+  const pnl_usd_pct = perf.initial_value_usd > 0
     ? (pnl_usd / perf.initial_value_usd) * 100
     : 0;
+  // When SOL fields are available, compute SOL-based PnL% for accurate lesson recording.
+  // SOL PnL is unaffected by SOL/USD price swings during the hold.
+  const pnl_sol = Number.isFinite(perf.final_value_sol) && Number.isFinite(perf.fees_earned_sol) && perf.initial_value_sol > 0
+    ? (perf.final_value_sol + perf.fees_earned_sol) - perf.initial_value_sol
+    : null;
+  const pnl_sol_pct = pnl_sol !== null && perf.initial_value_sol > 0
+    ? (pnl_sol / perf.initial_value_sol) * 100
+    : null;
+  const pnl_pct = pnl_sol_pct !== null ? pnl_sol_pct : pnl_usd_pct;
   const range_efficiency = perf.minutes_held > 0
     ? (perf.minutes_in_range / perf.minutes_held) * 100
     : 0;
@@ -113,6 +123,9 @@ export async function recordPerformance(perf) {
     ...perf,
     pnl_usd: Math.round(pnl_usd * 100) / 100,
     pnl_pct: Math.round(pnl_pct * 100) / 100,
+    pnl_usd_pct: Math.round(pnl_usd_pct * 100) / 100,
+    ...(pnl_sol !== null ? { pnl_sol: Math.round(pnl_sol * 10000) / 10000 } : {}),
+    ...(pnl_sol_pct !== null ? { pnl_sol_pct: Math.round(pnl_sol_pct * 100) / 100 } : {}),
     range_efficiency: Math.round(range_efficiency * 10) / 10,
     recorded_at: new Date().toISOString(),
   };
@@ -146,9 +159,24 @@ export async function recordPerformance(perf) {
       fees_earned_usd: perf.fees_earned_usd,
       fees_earned_sol: perf.fees_earned_sol,
       fee_earned_pct: perf.initial_value_usd > 0 ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100 : null,
+      fee_earned_pct_sol: perf.initial_value_sol > 0 ? ((perf.fees_earned_sol || 0) / perf.initial_value_sol) * 100 : null,
       close_reason: perf.close_reason,
       strategy: perf.strategy,
       volatility: perf.volatility,
+    });
+  }
+
+  // Evaluate and set cooldown based on close performance
+  if (perf.pool) {
+    const { evaluateAndSetCooldown } = await import("./pool-cooldown.js");
+    evaluateAndSetCooldown({
+      pool_address: perf.pool,
+      pool_name: perf.pool_name,
+      base_mint: perf.base_mint,
+      close_reason: perf.close_reason,
+      pnlUsd: entry.pnl_usd,
+      pnlPct: entry.pnl_pct,
+      recent_deploys: [],
     });
   }
 
@@ -216,7 +244,9 @@ function derivLesson(perf) {
     if (perf.range_efficiency < 30 && outcome === "bad") {
       rule = `AVOID: ${perf.pool_name}-type pools (volatility=${perf.volatility}, bin_step=${perf.bin_step}) with strategy="${perf.strategy}" — went OOR ${100 - perf.range_efficiency}% of the time. Consider wider bin_range or bid_ask strategy.`;
       tags.push("oor", perf.strategy, `volatility_${Math.round(perf.volatility)}`);
-    } else if (perf.range_efficiency > 80 && outcome === "good") {
+    } else if (perf.range_efficiency > 80 && outcome === "good" && perf.volatility != null) {
+      // Only write PREFER lessons when volatility is known — null-vol pools lack the
+      // key discriminating attribute so the lesson misleads future screening.
       rule = `PREFER: ${perf.pool_name}-type pools (volatility=${perf.volatility}, bin_step=${perf.bin_step}) with strategy="${perf.strategy}" — ${perf.range_efficiency}% in-range efficiency, PnL +${perf.pnl_pct}%.`;
       tags.push("efficient", perf.strategy);
     } else if (outcome === "bad" && perf.close_reason?.includes("volume")) {
@@ -300,33 +330,49 @@ export function evolveThresholds(perfData, config) {
   // If losers tend to cluster at higher volatility → tighten the ceiling.
   // If winners span higher volatility safely → we can loosen a bit.
   {
-    const winnerVols = winners.map((p) => p.volatility).filter(isFiniteNum);
-    const loserVols  = losers.map((p) => p.volatility).filter(isFiniteNum);
-    const current    = config.screening.maxVolatility;
+    // Only use records that pass the current minVolatility floor — stale losers
+    // from before minVol was raised are already screened out and shouldn't drag
+    // the ceiling down.
+    const minVol      = config.screening.minVolatility ?? 0;
+    const winnerVols  = winners.filter((p) => isFiniteNum(p.volatility) && p.volatility >= minVol).map((p) => p.volatility);
+    const loserVols   = losers.filter((p) => isFiniteNum(p.volatility) && p.volatility >= minVol).map((p) => p.volatility);
+    const current     = config.screening.maxVolatility;
+    const minVolFloor = minVol + 0.5;
 
-    if (loserVols.length >= 2) {
-      // 25th percentile of loser volatilities — this is where things start going wrong
-      const loserP25 = percentile(loserVols, 25);
-      if (loserP25 < current) {
-        // Tighten: new ceiling = loserP25 + a small buffer
-        const target  = loserP25 * 1.15;
-        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 1.0, 20.0);
-        const rounded = Number(newVal.toFixed(1));
-        if (rounded < current) {
-          changes.maxVolatility = rounded;
-          rationale.maxVolatility = `Losers clustered at volatility ~${loserP25.toFixed(1)} — tightened from ${current} → ${rounded}`;
+    // Skip if operator manually tuned maxVolatility in the last 24h — their override wins.
+    const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const lessonsData = load();
+    const recentOperatorTune = lessonsData.lessons.some((l) =>
+      l.tags?.includes("self_tune") &&
+      l.rule.includes("maxVolatility") &&
+      (l.created_at || "") >= cutoff24h
+    );
+
+    if (!recentOperatorTune) {
+      if (loserVols.length >= 2) {
+        // 25th percentile of loser volatilities — this is where things start going wrong
+        const loserP25 = percentile(loserVols, 25);
+        if (loserP25 < current) {
+          // Tighten: new ceiling = loserP25 + a small buffer, never below minVolatility + 0.5
+          const target  = loserP25 * 1.15;
+          const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), Math.max(1.0, minVolFloor), 20.0);
+          const rounded = Number(newVal.toFixed(1));
+          if (rounded < current) {
+            changes.maxVolatility = rounded;
+            rationale.maxVolatility = `Losers clustered at volatility ~${loserP25.toFixed(1)} — tightened from ${current} → ${rounded}`;
+          }
         }
-      }
-    } else if (winnerVols.length >= 3 && losers.length === 0) {
-      // All winners so far — loosen conservatively so we don't miss good pools
-      const winnerP75 = percentile(winnerVols, 75);
-      if (winnerP75 > current * 1.1) {
-        const target  = winnerP75 * 1.1;
-        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 1.0, 20.0);
-        const rounded = Number(newVal.toFixed(1));
-        if (rounded > current) {
-          changes.maxVolatility = rounded;
-          rationale.maxVolatility = `All ${winners.length} positions profitable — loosened from ${current} → ${rounded}`;
+      } else if (winnerVols.length >= 3 && losers.length === 0) {
+        // All winners so far — loosen conservatively so we don't miss good pools
+        const winnerP75 = percentile(winnerVols, 75);
+        if (winnerP75 > current * 1.1) {
+          const target  = winnerP75 * 1.1;
+          const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), Math.max(1.0, minVolFloor), 20.0);
+          const rounded = Number(newVal.toFixed(1));
+          if (rounded > current) {
+            changes.maxVolatility = rounded;
+            rationale.maxVolatility = `All ${winners.length} positions profitable — loosened from ${current} → ${rounded}`;
+          }
         }
       }
     }
@@ -337,7 +383,7 @@ export function evolveThresholds(perfData, config) {
   {
     const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
     const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const current    = config.screening.minFeeTvlRatio;
+    const current    = config.screening.minFeeActiveTvlRatio;
 
     if (winnerFees.length >= 2) {
       // Minimum fee/TVL among winners — we know pools below this don't work for us
@@ -347,8 +393,8 @@ export function evolveThresholds(perfData, config) {
         const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
         const rounded = Number(newVal.toFixed(2));
         if (rounded > current) {
-          changes.minFeeTvlRatio = rounded;
-          rationale.minFeeTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
+          changes.minFeeActiveTvlRatio = rounded;
+          rationale.minFeeActiveTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
         }
       }
     }
@@ -363,9 +409,9 @@ export function evolveThresholds(perfData, config) {
           const target  = maxLoserFee * 1.2;
           const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
           const rounded = Number(newVal.toFixed(2));
-          if (rounded > current && !changes.minFeeTvlRatio) {
-            changes.minFeeTvlRatio = rounded;
-            rationale.minFeeTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
+          if (rounded > current && !changes.minFeeActiveTvlRatio) {
+            changes.minFeeActiveTvlRatio = rounded;
+            rationale.minFeeActiveTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
           }
         }
       }
@@ -412,20 +458,12 @@ export function evolveThresholds(perfData, config) {
 
   // Apply to live config object immediately
   const s = config.screening;
-  if (changes.maxVolatility    != null) s.maxVolatility    = changes.maxVolatility;
-  if (changes.minFeeTvlRatio   != null) s.minFeeTvlRatio   = changes.minFeeTvlRatio;
+  if (changes.maxVolatility         != null) s.maxVolatility         = changes.maxVolatility;
+  if (changes.minFeeActiveTvlRatio  != null) s.minFeeActiveTvlRatio  = changes.minFeeActiveTvlRatio;
   if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
 
-  // Log a lesson summarizing the evolution
-  const data = load();
-  data.lessons.push({
-    id: Date.now(),
-    rule: `[AUTO-EVOLVED @ ${perfData.length} positions] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
-    tags: ["evolution", "config_change"],
-    outcome: "manual",
-    created_at: new Date().toISOString(),
-  });
-  save(data);
+  // Log to file only — don't pollute the lessons store with audit entries
+  log("evolve", `[AUTO-EVOLVED @ ${perfData.length} positions] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`);
 
   return { changes, rationale };
 }

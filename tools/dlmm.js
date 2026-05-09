@@ -597,6 +597,14 @@ export async function deployPosition({
   }
   const activeBin = await pool.getActiveBin();
   const actualBinStep = pool.lbPair.binStep;
+
+  // Hard guard — validate actual on-chain bin_step before any deploy work
+  const minStep = config.screening.minBinStep;
+  const maxStep = config.screening.maxBinStep;
+  if (actualBinStep < minStep || actualBinStep > maxStep) {
+    return { success: false, error: `bin_step ${actualBinStep} is outside the allowed range [${minStep}-${maxStep}]. Deploy blocked.` };
+  }
+
   const activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
 
   if (downside_pct != null || upside_pct != null) {
@@ -658,12 +666,13 @@ export async function deployPosition({
   const finalAmountY = amount_y ?? amount_sol ?? fallbackAmountY;
   const finalAmountX = amount_x ?? 0;
   const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
-  if (isSingleSidedSol && (Number(bins_above ?? 0) > 0 || Number(upside_pct ?? 0) > 0)) {
-    throw new Error(
-      "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
-    );
-  }
+  // Single-sided SOL: protocol requires upper bin = active bin, so activeBinsAbove must be 0.
+  // We still record the intended bins_above in bin_range for Rule 3 tolerance tracking.
+  const intendedBinsAbove = isSingleSidedSol ? (bins_above ?? 0) : activeBinsAbove;
   if (isSingleSidedSol) {
+    if (activeBinsAbove > 0) {
+      log("deploy", `bins_above=${activeBinsAbove} stored for Rule 3 tolerance (single-side SOL — actual upper stays at active bin)`);
+    }
     activeBinsAbove = 0;
   }
   const totalBins = activeBinsBelow + activeBinsAbove;
@@ -769,7 +778,7 @@ export async function deployPosition({
           pool: pool_address,
           pool_name,
           strategy: activeStrategy,
-          bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
+          bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: intendedBinsAbove },
           bin_step,
           volatility,
           fee_tvl_ratio,
@@ -1155,8 +1164,8 @@ async function fetchOpenPositionsFromMeridian({ walletAddress, agentId }) {
   const payload = await meridianJson(`/positions/open?${search.toString()}`, {
     headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
     retry: {
-      maxElapsedMs: 30_000,
-      perAttemptTimeoutMs: 30_000,
+      maxElapsedMs: 8_000,
+      perAttemptTimeoutMs: 5_000,
     },
   });
   return {
@@ -1190,6 +1199,10 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           agentId: config.hiveMind.agentId || "agent-local",
         });
         const normalizedPositions = Array.isArray(result.positions) ? result.positions : [];
+        for (const pos of normalizedPositions) {
+          const tracked = getTrackedPosition(pos.position);
+          pos.strategy = tracked?.strategy ?? null;
+        }
         syncOpenPositions(normalizedPositions.map((p) => p.position));
         _positionsCache = {
           wallet: walletAddress,
@@ -1348,6 +1361,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           age_minutes:        binData?.createdAt ? Math.floor((Date.now() - binData.createdAt * 1000) / 60000) : ageFromState,
           minutes_out_of_range: minutesOutOfRange(positionAddress),
           instruction:        tracked?.instruction ?? null,
+          strategy:            tracked?.strategy ?? null,
         });
       }
     }
@@ -1523,7 +1537,7 @@ export async function closePosition({ position_address, reason }) {
             positionId: position_address,
             owner: wallet.publicKey.toString(),
             bps: 10000,
-            slippageBps: 5000,
+            slippageBps: 1000,
             output: closeOutput,
             provider: "OKX",
             type: "meteora",
@@ -1611,9 +1625,14 @@ export async function closePosition({ position_address, reason }) {
 
           let pnlUsd = 0;
           let pnlPct = 0;
+          let pnlSol = 0;
+          let pnlSolPct = 0;
           let finalValueUsd = 0;
+          let finalValueSol = 0;
           let initialUsd = 0;
           let feesUsd = tracked.total_fees_claimed_usd || 0;
+          let feesSol = 0;
+          let initialSol = 0;
           try {
             const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
             for (let attempt = 0; attempt < 6; attempt++) {
@@ -1624,9 +1643,14 @@ export async function closePosition({ position_address, reason }) {
                 if (posEntry) {
                   pnlUsd = parseFloat(posEntry.pnlUsd || 0);
                   pnlPct = parseFloat(posEntry.pnlPctChange || 0);
+                  pnlSol = parseFloat(posEntry.pnlSol || 0);
+                  pnlSolPct = parseFloat(posEntry.pnlSolPctChange || 0);
                   finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
+                  finalValueSol = parseFloat(posEntry.allTimeWithdrawals?.total?.sol || 0);
                   initialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
                   feesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+                  feesSol = parseFloat(posEntry.allTimeFees?.total?.sol || 0);
+                  initialSol = parseFloat(posEntry.allTimeDeposits?.total?.sol || 0);
                   break;
                 }
               }
@@ -1649,8 +1673,11 @@ export async function closePosition({ position_address, reason }) {
             organic_score: tracked.organic_score || null,
             amount_sol: tracked.amount_sol,
             fees_earned_usd: feesUsd,
+            fees_earned_sol: feesSol,
             final_value_usd: finalValueUsd,
+            final_value_sol: finalValueSol,
             initial_value_usd: initialUsd,
+            initial_value_sol: initialSol,
             minutes_in_range: minutesHeld - minutesOOR,
             minutes_held: minutesHeld,
             close_reason: reason || "agent decision",
@@ -1692,15 +1719,26 @@ export async function closePosition({ position_address, reason }) {
           };
         }
 
+          const displayPnlPct = config.management.solMode && pnlSolPct !== 0 ? pnlSolPct : pnlPct;
         appendDecision({
           type: "close",
           actor: "MANAGER",
           pool: poolAddress,
           pool_name: poolMeta.name || poolAddress.slice(0, 8),
           position: position_address,
-          summary: "Relay closed position",
+          summary: `Relay closed at ${displayPnlPct.toFixed(2)}%${config.management.solMode ? " (SOL)" : ""}`,
           reason: reason || "agent decision",
-          metrics: {},
+          risks: [
+            minutesOOR > 0 ? `out of range ${minutesOOR}m` : null,
+            tracked.volatility != null ? `volatility ${tracked.volatility}` : null,
+          ].filter(Boolean),
+          metrics: {
+            pnl_usd: pnlUsd,
+            pnl_sol: pnlSol || null,
+            pnl_pct: displayPnlPct,
+            fees_usd: feesUsd,
+            minutes_held: minutesHeld,
+          },
         });
 
         return {
@@ -1713,6 +1751,13 @@ export async function closePosition({ position_address, reason }) {
           claim_txs: claimTxHashes,
           close_txs: closeTxHashes,
           txs: txHashes,
+          amount_sol: tracked.amount_sol ?? null,
+          pnl_usd: pnlUsd,
+          pnl_sol: pnlSol || null,
+          pnl_pct: displayPnlPct,
+          fees_usd: feesUsd,
+          fees_sol: feesSol,
+          minutes_held: minutesHeld,
           base_mint: livePosition?.base_mint || null,
         };
       } catch (relayError) {
@@ -1854,9 +1899,14 @@ export async function closePosition({ position_address, reason }) {
       // Fetch closed PnL from API — authoritative source after withdrawal settles
       let pnlUsd = 0;
       let pnlPct = 0;
+      let pnlSol = 0;
+      let pnlSolPct = 0;
       let finalValueUsd = 0;
+      let finalValueSol = 0;
       let initialUsd = 0;
       let feesUsd = tracked.total_fees_claimed_usd || 0;
+      let feesSol = 0;
+      let initialSol = 0;
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
         for (let attempt = 0; attempt < 6; attempt++) {
@@ -1867,19 +1917,29 @@ export async function closePosition({ position_address, reason }) {
             if (posEntry) {
               const nextPnlUsd = parseFloat(posEntry.pnlUsd || 0);
               const nextPnlPct = parseFloat(posEntry.pnlPctChange || 0);
+              const nextPnlSol = parseFloat(posEntry.pnlSol || 0);
+              const nextPnlSolPct = parseFloat(posEntry.pnlSolPctChange || 0);
               const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
+              const nextFinalValueSol = parseFloat(posEntry.allTimeWithdrawals?.total?.sol || 0);
               const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
               const nextFeesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+              const nextFeesSol = parseFloat(posEntry.allTimeFees?.total?.sol || 0);
+              const nextInitialSol = parseFloat(posEntry.allTimeDeposits?.total?.sol || 0);
 
               if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
                 log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
               } else {
                 pnlUsd        = nextPnlUsd;
                 pnlPct        = nextPnlPct;
+                pnlSol        = nextPnlSol;
+                pnlSolPct     = nextPnlSolPct;
                 finalValueUsd = nextFinalValueUsd;
+                finalValueSol = nextFinalValueSol;
                 initialUsd    = nextInitialUsd;
                 feesUsd       = nextFeesUsd;
-                log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} USD (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)}, deposited=${initialUsd.toFixed(2)}`);
+                feesSol       = nextFeesSol;
+                initialSol    = nextInitialSol;
+                log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} USD (${pnlPct.toFixed(2)}%) | ${pnlSol.toFixed(4)} SOL (${pnlSolPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)}, deposited=${initialUsd.toFixed(2)}`);
                 break;
               }
             } else {
@@ -1924,20 +1984,24 @@ export async function closePosition({ position_address, reason }) {
         organic_score: tracked.organic_score || null,
         amount_sol: tracked.amount_sol,
         fees_earned_usd: feesUsd,
+        fees_earned_sol: feesSol,
         final_value_usd: finalValueUsd,
+        final_value_sol: finalValueSol,
         initial_value_usd: initialUsd,
+        initial_value_sol: initialSol,
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
       });
 
+      const displayPnlPct = config.management.solMode && pnlSolPct !== 0 ? pnlSolPct : pnlPct;
       appendDecision({
         type: "close",
         actor: "MANAGER",
         pool: poolAddress,
         pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
         position: position_address,
-        summary: `Closed at ${pnlPct.toFixed(2)}%`,
+        summary: `Closed at ${displayPnlPct.toFixed(2)}%${config.management.solMode ? " (SOL)" : ""}`,
         reason: reason || "agent decision",
         risks: [
           minutesOOR > 0 ? `out of range ${minutesOOR}m` : null,
@@ -1945,7 +2009,8 @@ export async function closePosition({ position_address, reason }) {
         ].filter(Boolean),
         metrics: {
           pnl_usd: pnlUsd,
-          pnl_pct: pnlPct,
+          pnl_sol: pnlSol || null,
+          pnl_pct: displayPnlPct,
           fees_usd: feesUsd,
           minutes_held: minutesHeld,
         },
@@ -1959,8 +2024,13 @@ export async function closePosition({ position_address, reason }) {
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
         txs: txHashes,
+        amount_sol: tracked.amount_sol ?? null,
         pnl_usd: pnlUsd,
-        pnl_pct: pnlPct,
+        pnl_sol: pnlSol || null,
+        pnl_pct: displayPnlPct,
+        fees_usd: feesUsd,
+        fees_sol: feesSol,
+        minutes_held: minutesHeld,
         base_mint: pool.lbPair.tokenXMint.toString(),
       };
     }
@@ -1985,6 +2055,8 @@ export async function closePosition({ position_address, reason }) {
       close_txs: closeTxHashes,
       txs: txHashes,
       base_mint: pool.lbPair.tokenXMint.toString(),
+      fees_usd: 0,
+      minutes_held: 0,
     };
   } catch (error) {
     log("close_error", error.message);

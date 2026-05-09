@@ -65,6 +65,7 @@ export const config = {
     source:            u.screeningSource    ?? "meteora", // meteora | gmgn
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
+    maxFeeActiveTvlRatio: u.maxFeeActiveTvlRatio !== undefined ? u.maxFeeActiveTvlRatio : null,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
@@ -75,6 +76,8 @@ export const config = {
     maxMcap:           u.maxMcap           ?? 10_000_000,
     minBinStep:        u.minBinStep        ?? 80,
     maxBinStep:        u.maxBinStep        ?? 125,
+    minVolatility:     u.minVolatility     ?? null, // null = no minimum
+    maxVolatility:     u.maxVolatility     ?? 5,
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
@@ -151,10 +154,18 @@ export const config = {
   management: {
     minClaimAmount:        u.minClaimAmount        ?? 5,
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
-    outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
-    outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
+    outOfRangeBinsToClose:      u.outOfRangeBinsToClose      ?? 10,
+    outOfRangeWaitMinutes:      u.outOfRangeWaitMinutes      ?? 35,
+    outOfRangeBelowWaitMinutes: u.outOfRangeBelowWaitMinutes ?? 8,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
+    lowYieldCooldownHours:  u.lowYieldCooldownHours  ?? 4,
+    stopLossCooldownHours:  u.stopLossCooldownHours  ?? 2,
+    lossGt1PctCooldownHours: u.lossGt1PctCooldownHours ?? 1,
+    oorBigLossCooldownHours: u.oorBigLossCooldownHours ?? 6,
+    oorBigLossPnlThreshold: u.oorBigLossPnlThreshold ?? -2,
+    cumulativeLossCooldownHours: u.cumulativeLossCooldownHours ?? 48,
+    cumulativeLossThreshold: u.cumulativeLossThreshold ?? -5,
     repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
     repeatDeployCooldownTriggerCount: u.repeatDeployCooldownTriggerCount ?? 3,
     repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
@@ -176,6 +187,12 @@ export const config = {
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
+    // Close-rule profile — controls which variant of each closing rule is applied
+    // "main"         — hard deterministic rules (current default behaviour)
+    // "pecut"        — adds Safety-Lock (hold OOR if unprofitable), 3s trailing confirm, OOR profit gate
+    // "experimental" — same as pecut + indicator validation, PVP rivalry check
+    closeProfile:          u.closeProfile          ?? "main",
+    minProfitPctToCloseOOR: u.minProfitPctToCloseOOR ?? 0, // pecut/experimental: min PnL% required before Rule 3 fires
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -183,6 +200,7 @@ export const config = {
     strategy:     u.strategy     ?? "bid_ask",
     minBinsBelow: u.minBinsBelow ?? 35,
     maxBinsBelow: u.maxBinsBelow ?? 69,
+    binsAbove:    u.binsAbove    ?? 20,
   },
 
   // ─── Scheduling ─────────────────────────
@@ -198,8 +216,15 @@ export const config = {
     maxTokens:   u.maxTokens   ?? 4096,
     maxSteps:    u.maxSteps    ?? 20,
     managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
-    screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
+    screeningModel:  u.screeningModel  ?? process.env.SCREENING_LLM_MODEL ?? "mimo-v2.5",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
+    // Screening-specific LLM endpoint (Xiaomi Token Plan Singapore)
+    screeningBaseUrl: u.screeningBaseUrl ?? process.env.SCREENING_LLM_BASE_URL ?? null,
+    screeningApiKey:  u.screeningApiKey  ?? process.env.SCREENING_LLM_API_KEY ?? null,
+    // Global fallback LLM (all roles when primary fails with 502/503/529)
+    fallbackModel:   u.fallbackModel   ?? "stepfun/step-3.5-flash:free",
+    fallbackBaseUrl: u.fallbackBaseUrl ?? process.env.FALLBACK_LLM_BASE_URL ?? "https://openrouter.ai/api/v1",
+    fallbackApiKey:  u.fallbackApiKey  ?? process.env.FALLBACK_LLM_API_KEY ?? process.env.OPENROUTER_API_KEY ?? null,
   },
 
   // ─── Darwinian Signal Weighting ───────
@@ -294,6 +319,7 @@ export function reloadScreeningThresholds() {
     const s = config.screening;
     if (fresh.screeningSource != null) s.source = fresh.screeningSource;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
+    if (fresh.maxFeeActiveTvlRatio !== undefined) s.maxFeeActiveTvlRatio = fresh.maxFeeActiveTvlRatio;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;

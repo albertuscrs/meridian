@@ -1,0 +1,52 @@
+{
+  "4RYpc6HRvoFdLbFetmD7Vr1B7nKMWLwiUCKAH77emdLy": {
+    "label": "manual blacklist",
+    "reason": "user request",
+    "added_at": "2026-04-18T18:45:17.761Z"
+  },
+  "E4RidUqGqFZhUY5BjBS62JYHGVv7kQSPigumC2bjPDhs": {
+    "label": "unt",
+    "reason": "unt not a good one",
+    "added_at": "2026-04-30T16:47:42.255Z"
+  },
+  "82VbBzGtb8v5wFx1TM6iaMmLyRSLy8WeqA123orjHGzL": {
+    "label": "PVE",
+    "reason": "PVE super rug I cannot understand why people rugged me",
+    "added_at": "2026-04-30T16:49:36.821Z"
+  },
+  "D2VB2NLzqLfuk9FLEUs4afvMyn97A8nFiCyBVj1X7Z7J": {
+    "label": "uncraft",
+    "reason": "uncraft I see nothing here",
+    "added_at": "2026-04-30T16:52:27.555Z"
+  },
+  "EYfdt8cNFyyTEJKp18dcoVbgUHDnM1SK3bT2uKj9XXHc": {
+    "label": "Picante",
+    "reason": "picante I don't like this kind of bird",
+    "added_at": "2026-04-30T16:55:35.465Z"
+  },
+  "6ZnydvtUFJcNChwvuqVKKdens45r3au7dnFcQVKp77a4": {
+    "label": "MLG",
+    "reason": "MLG not a good token",
+    "added_at": "2026-04-30T16:55:57.616Z"
+  },
+  "A257pvy8sJoXKAsLY7oP1ZBCkk94dTRPQfKEh1XrQoen": {
+    "label": "HIGHER",
+    "reason": "HIGHER not going higher anyway",
+    "added_at": "2026-04-30T16:56:21.008Z"
+  },
+  "G9e6T4R2tT6mKpqERPxoEbkUxnaRZWF4DgBdMwLnQtpH": {
+    "label": "XRP",
+    "reason": "XRP ass.",
+    "added_at": "2026-04-30T16:59:15.246Z"
+  },
+  "9Q18hhGJxvy16VAa8Th8Lua4WUSxnW1E1mYmqS16aPFN": {
+    "label": "assface",
+    "reason": "assface ass.",
+    "added_at": "2026-04-30T16:59:29.616Z"
+  },
+  "Apple-SOL": {
+    "label": "unknown",
+    "reason": "yenni kol is a bad kol",
+    "added_at": "2026-05-05T08:16:03.578Z"
+  }
+}

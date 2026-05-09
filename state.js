@@ -299,7 +299,7 @@ export function queueTrailingDropConfirmation(position_address, peakPnlPct, curr
   return true;
 }
 
-export function resolvePendingTrailingDrop(position_address, currentPnlPct, trailingDropPct, tolerancePct = 1.0) {
+export function resolvePendingTrailingDrop(position_address, currentPnlPct, trailingDropPct, tolerancePct = 1.0, windowLabel = "15s") {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed || pos.pending_trailing_current_pnl_pct == null || pos.pending_trailing_peak_pnl_pct == null) {
@@ -328,7 +328,7 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
   }
 
   save(state);
-  log("state", `Position ${position_address} rejected trailing drop after 15s recheck (pending current: ${pendingCurrent.toFixed(2)}%, current: ${currentPnlPct ?? "?"}%)`);
+  log("state", `Position ${position_address} rejected trailing drop after ${windowLabel} recheck (pending current: ${pendingCurrent.toFixed(2)}%, current: ${currentPnlPct ?? "?"}%)`);
   return { confirmed: false, rejected: true };
 }
 
@@ -390,6 +390,8 @@ export function getStateSummary() {
  */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
+  // "main" | "pecut" | "experimental" — governs which variant of each rule applies
+  const profile = mgmtConfig.closeProfile ?? "main";
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
@@ -428,41 +430,72 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (changed) save(state);
 
-  // ── Stop loss ──────────────────────────────────────────────────
+  // ── Rule 1: Stop Loss ──────────────────────────────────────────
+  // pecut/experimental: LLM-eval path not yet implemented (R3) — falls through to main behaviour
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
     return {
       action: "STOP_LOSS",
       reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+      profile,
     };
   }
 
-  // ── Trailing TP ────────────────────────────────────────────────
+  // ── Rule 2: Trailing TP ────────────────────────────────────────
+  // Always queues for timer-based confirmation — never fires instant close (R4.1)
+  // Confirmation window: pecut=3s, main/experimental=15s (scheduleTrailingDropConfirmation in index.js)
   if (!pnl_pct_suspicious && pos.trailing_active) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
-      return {
-        action: "TRAILING_TP",
-        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
-        needs_confirmation: true,
-        peak_pnl_pct: pos.peak_pnl_pct,
-        current_pnl_pct: currentPnlPct,
-        drop_from_peak_pct: dropFromPeak,
-      };
+      queueTrailingDropConfirmation(position_address, pos.peak_pnl_pct, currentPnlPct, mgmtConfig.trailingDropPct);
+      return { action: "TRAILING_TP_QUEUED" };
     }
   }
 
-  // ── Out of range too long ──────────────────────────────────────
+  // ── Rule 4: Out of range too long ─────────────────────────────
+  // pecut/experimental: Safety-Lock — hold if currentPnlPct <= 0 (R7 implemented)
+  // experimental: additionally Indicator-Aware via RSI/Supertrend (R8, not yet implemented)
   if (pos.out_of_range_since) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
-    if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
-      return {
-        action: "OUT_OF_RANGE",
-        reason: `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`,
-      };
+    const { active_bin, lower_bin, upper_bin } = positionData;
+    const trailingArmed = pos.trailing_active ?? false;
+
+    if (active_bin != null && upper_bin != null && active_bin > upper_bin) {
+      const oorLimit = trailingArmed ? 0 : (mgmtConfig.outOfRangeWaitMinutes ?? 35);
+      if (minutesOOR >= oorLimit) {
+        if ((profile === "pecut" || profile === "experimental") && (currentPnlPct == null || currentPnlPct <= 0)) {
+          log("state", `Safety-Lock: ${position_address} OOR above for ${minutesOOR}m but PnL ${currentPnlPct != null ? currentPnlPct.toFixed(2) : "?"}% — holding (profile: ${profile})`);
+          return null;
+        }
+        return {
+          action: "OUT_OF_RANGE",
+          reason: trailingArmed
+            ? "Trailing TP: OOR above (trailing armed)"
+            : `OOR above for ${minutesOOR}m (limit: ${oorLimit}m)`,
+          profile,
+        };
+      }
+    }
+
+    if (active_bin != null && lower_bin != null && active_bin < lower_bin) {
+      const oorLimit = trailingArmed ? 0 : (mgmtConfig.outOfRangeBelowWaitMinutes ?? 8);
+      if (minutesOOR >= oorLimit) {
+        if ((profile === "pecut" || profile === "experimental") && (currentPnlPct == null || currentPnlPct <= 0)) {
+          log("state", `Safety-Lock: ${position_address} OOR below for ${minutesOOR}m but PnL ${currentPnlPct != null ? currentPnlPct.toFixed(2) : "?"}% — holding (profile: ${profile})`);
+          return null;
+        }
+        return {
+          action: "OUT_OF_RANGE",
+          reason: trailingArmed
+            ? "Trailing TP: OOR below (trailing armed)"
+            : `OOR below for ${minutesOOR}m (limit: ${oorLimit}m)`,
+          profile,
+        };
+      }
     }
   }
 
-  // ── Low yield (only after position has had time to accumulate fees) ───
+  // ── Rule 5: Low yield ──────────────────────────────────────────
+  // All profiles: respect minAgeBeforeYieldCheck (configurable)
   const { age_minutes } = positionData;
   const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
   if (
@@ -474,6 +507,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     return {
       action: "LOW_YIELD",
       reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
+      profile,
     };
   }
 

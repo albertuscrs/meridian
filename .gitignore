@@ -30,7 +30,26 @@ logs/
 
 # Dev context
 context.md
-docs/
 
 # Test files
 test-*.js
+
+# Wallet keys — defensive (also keep outside repo)
+*.pem
+private_key*
+public_key*
+
+# State backups
+state.json.backup-*
+state.json.bak
+*.save
+
+# Misc
+10000
+
+# Claude Code local settings
+.claude/
+.gitignore.backup-*
+
+# Backup .gitignore files
+.gitignore.backup-*

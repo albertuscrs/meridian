@@ -5,6 +5,14 @@ import { getPerformanceSummary } from "./lessons.js";
 const STATE_FILE = "./state.json";
 const LESSONS_FILE = "./lessons.json";
 
+function htmlEscape(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export async function generateBriefing() {
   const state = loadJson(STATE_FILE) || { positions: {}, recentEvents: [] };
   const lessonsData = loadJson(LESSONS_FILE) || { lessons: [], performance: [] };
@@ -45,8 +53,8 @@ export async function generateBriefing() {
       : "📈 Win Rate (24h): N/A",
     "",
     `<b>Lessons Learned:</b>`,
-    lessonsLast24h.length > 0
-      ? lessonsLast24h.map(l => `• ${l.rule}`).join("\n")
+      lessonsLast24h.length > 0
+      ? lessonsLast24h.map(l => `• ${htmlEscape(l.rule)}`).join("\n")
       : "• No new lessons recorded overnight.",
     "",
     `<b>Current Portfolio:</b>`,

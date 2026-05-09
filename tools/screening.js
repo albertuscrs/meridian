@@ -128,6 +128,9 @@ export async function discoverPools({
     `dlmm_bin_step>=${s.minBinStep}`,
     `dlmm_bin_step<=${s.maxBinStep}`,
     `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
+    s.maxFeeActiveTvlRatio != null ? `fee_active_tvl_ratio<=${s.maxFeeActiveTvlRatio}` : null,
+    s.minVolatility != null ? `volatility>=${s.minVolatility}` : null,
+    s.maxVolatility != null ? `volatility<=${s.maxVolatility}` : null,
     `base_token_organic_score>=${s.minOrganic}`,
     `quote_token_organic_score>=${s.minQuoteOrganic}`,
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
@@ -322,6 +325,35 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (isBaseMintOnCooldown(p.base?.mint)) {
         log("screening", `Filtered cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
         pushFilteredReason(filteredOut, p, "token cooldown active");
+        return false;
+      }
+      // Fee/TVL check for GMGN candidates (Meteora path enforces this via API query; GMGN path does not)
+      const feeTvl = p.fee_active_tvl_ratio ?? null;
+      if (feeTvl != null && config.screening.minFeeActiveTvlRatio != null && feeTvl < config.screening.minFeeActiveTvlRatio) {
+        log("screening", `Filtered low fee/TVL pool ${p.name} (${config.screening.timeframe} fee/tvl=${feeTvl} < min=${config.screening.minFeeActiveTvlRatio})`);
+        pushFilteredReason(filteredOut, p, `${config.screening.timeframe} fee/TVL ${feeTvl}% below min ${config.screening.minFeeActiveTvlRatio}%`);
+        return false;
+      }
+      if (feeTvl != null && config.screening.maxFeeActiveTvlRatio != null && feeTvl > config.screening.maxFeeActiveTvlRatio) {
+        log("screening", `Filtered high fee/TVL pool ${p.name} (${config.screening.timeframe} fee/tvl=${feeTvl} > max=${config.screening.maxFeeActiveTvlRatio})`);
+        pushFilteredReason(filteredOut, p, `${config.screening.timeframe} fee/TVL ${feeTvl}% exceeds max ${config.screening.maxFeeActiveTvlRatio}%`);
+        return false;
+      }
+      const minVol = config.screening.minVolatility;
+      const maxVol = config.screening.maxVolatility;
+      if ((minVol != null || maxVol != null) && p.volatility == null) {
+        log("screening", `Filtered no-volatility-data pool ${p.name} (volatility=null, filter active)`);
+        pushFilteredReason(filteredOut, p, `volatility data missing (filter requires ${minVol ?? 0}–${maxVol ?? "∞"})`);
+        return false;
+      }
+      if (minVol != null && p.volatility < minVol) {
+        log("screening", `Filtered low-volatility pool ${p.name} (vol=${p.volatility} < min=${minVol})`);
+        pushFilteredReason(filteredOut, p, `volatility ${p.volatility} below min ${minVol}`);
+        return false;
+      }
+      if (maxVol != null && p.volatility > maxVol) {
+        log("screening", `Filtered high-volatility pool ${p.name} (vol=${p.volatility} > max=${maxVol})`);
+        pushFilteredReason(filteredOut, p, `volatility ${p.volatility} exceeds max ${maxVol}`);
         return false;
       }
       return true;
