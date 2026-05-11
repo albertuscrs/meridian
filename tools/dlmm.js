@@ -1194,8 +1194,8 @@ async function fetchOpenPositionsFromMeridian({ walletAddress, agentId }) {
   const payload = await meridianJson(`/positions/open?${search.toString()}`, {
     headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
     retry: {
-      maxElapsedMs: 8_000,
-      perAttemptTimeoutMs: 5_000,
+      maxElapsedMs: 15_000,  // Increased from 8s to 15s
+      perAttemptTimeoutMs: 8_000,  // Increased from 5s to 8s
     },
   });
   return {
