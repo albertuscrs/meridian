@@ -52,14 +52,20 @@ export async function checkHiveMind() {
 }
 
 export async function checkGmgnIndicators() {
-  const mint = "So11111111111111111111111111111111111111112"; // SOL as test
-  const url = `https://gmgn.ai/api/v1/market/indicators?chain=sol&address=${mint}&interval=5m`;
+  const baseUrl = config.gmgn?.baseUrl || "https://openapi.gmgn.ai";
+  const apiKey = config.gmgn?.apiKey || process.env.GMGN_API_KEY;
+  const url = `${baseUrl}/v1/market/rank?chain=sol&interval=5m&order_by=volume&direction=desc&limit=1&timestamp=${Math.floor(Date.now() / 1000)}&client_id=test`;
   const start = Date.now();
-  const res = await fetchWithTimeout(url);
+  const res = await fetchWithTimeout(url, {
+    headers: {
+      "X-APIKEY": apiKey || "",
+      "Content-Type": "application/json",
+    },
+  });
   const latency = Date.now() - start;
   return {
-    name: "GMGN Chart Indicators",
-    url: "gmgn.ai",
+    name: "GMGN API",
+    url: baseUrl.replace(/https?:\/\//, ""),
     status: res.status,
     ok: res.ok,
     latency,
