@@ -553,7 +553,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
 
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
-    // Skipped for GMGN: platforms already filtered upstream; bundler/bot data from GMGN pipeline
+    // GMGN candidates: launchpad filtering done upstream in Stage 2 (gmgn.js)
+    // Meteora candidates: launchpad filtering done here
     const filteredOut = [];
     const passing = allCandidates.filter(({ pool, ti }) => {
       if (pool.gmgn) return true;

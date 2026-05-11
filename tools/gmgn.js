@@ -29,6 +29,12 @@ function getApiKey() {
   return key;
 }
 
+function includesCaseInsensitive(values, value) {
+  if (!Array.isArray(values) || values.length === 0 || !value) return false;
+  const needle = String(value).toLowerCase();
+  return values.some((entry) => String(entry).toLowerCase() === needle);
+}
+
 function normalizeInterval(value, fallback = "5m") {
   const normalized = String(value || fallback).trim();
   return SUPPORTED_INTERVALS.has(normalized) ? normalized : fallback;
@@ -560,6 +566,21 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
         filtered.push({ stage: 2, name: token.symbol || mint, reason: infoCheck.reasons.join(", ") });
         continue;
       }
+
+      // Launchpad filtering
+      const launchpad = token.launchpad_platform || info.launchpad_platform || info.launchpad || null;
+      const s = config.screening;
+      if (launchpad) {
+        if (Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0 && !includesCaseInsensitive(s.allowedLaunchpads, launchpad)) {
+          filtered.push({ stage: 2, name: token.symbol || mint, reason: `launchpad ${launchpad} not in allow-list` });
+          continue;
+        }
+        if (includesCaseInsensitive(s.blockedLaunchpads, launchpad)) {
+          filtered.push({ stage: 2, name: token.symbol || mint, reason: `blocked launchpad (${launchpad})` });
+          continue;
+        }
+      }
+
       s2.push({ token, info, infoCheck });
     } catch (error) {
       log("gmgn", `Stage2 skip ${token.symbol || mint}: ${error.message}`);
