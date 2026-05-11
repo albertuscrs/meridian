@@ -28,6 +28,16 @@ import {
   fmtRangeBar,
   saveAllowedUserId,
 } from "./telegram.js";
+import {
+  checkRelay,
+  checkHiveMind,
+  checkGmgnIndicators,
+  checkJupiter,
+  checkMeteora,
+  checkSolanaRpc,
+  checkAllApis,
+  formatApiStatus,
+} from "./tools/api-monitor.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
@@ -1864,6 +1874,13 @@ function formatHelpText() {
     "",
     "/help — show commands",
     "/status — wallet + positions snapshot",
+    "/status apis — check all API status (relay, hivemind, gmgn, jupiter, meteora, rpc)",
+    "/status relay — check Agent Meridian relay status",
+    "/status hivemind — check HiveMind server status",
+    "/status gmgn — check GMGN chart indicators status",
+    "/status jupiter — check Jupiter swap API status",
+    "/status meteora — check Meteora DLMM API status",
+    "/status rpc — check Solana RPC status",
     "/wallet — wallet, deploy amount, HiveMind status",
     "/positions — list open positions",
     "/history — last 10 closed positions",
@@ -2128,6 +2145,57 @@ async function telegramHandler(msg) {
         ? `\n\nUse /positions for the numbered list.`
         : "";
       await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // /status subcommands: relay, hivemind, gmgn, jupiter, meteora, rpc, apis
+  if (text.startsWith("/status ")) {
+    const subcommand = text.slice(8).trim().toLowerCase();
+    try {
+      let result;
+      let name;
+      switch (subcommand) {
+        case "relay":
+          result = await checkRelay();
+          name = result.name;
+          break;
+        case "hivemind":
+          result = await checkHiveMind();
+          name = result.name;
+          break;
+        case "gmgn":
+          result = await checkGmgnIndicators();
+          name = result.name;
+          break;
+        case "jupiter":
+          result = await checkJupiter();
+          name = result.name;
+          break;
+        case "meteora":
+          result = await checkMeteora();
+          name = result.name;
+          break;
+        case "rpc":
+          result = await checkSolanaRpc();
+          name = result.name;
+          break;
+        case "apis":
+        case "all":
+          const results = await checkAllApis();
+          await sendHTML(`<b>🔍 API Status</b>\n\n${formatApiStatus(results)}`).catch(() => {});
+          return;
+        default:
+          await sendMessage(`Unknown subcommand: /status ${subcommand}\n\nAvailable: relay, hivemind, gmgn, jupiter, meteora, rpc, apis`).catch(() => {});
+          return;
+      }
+      const icon = result.ok ? "✅" : "❌";
+      const latency = result.latency ? `${result.latency}ms` : "?";
+      const status = result.status ? `${result.status}` : "timeout";
+      const error = result.error ? `\n⚠️ ${result.error}` : "";
+      await sendHTML(`${icon} <b>${name}</b>\nStatus: ${status} (${latency})${error}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
