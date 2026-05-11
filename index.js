@@ -2194,7 +2194,7 @@ async function telegramHandler(msg) {
       const icon = result.ok ? "✅" : "❌";
       const latency = result.latency ? `${result.latency}ms` : "?";
       const status = result.status ? `${result.status}` : "timeout";
-      const error = result.error ? `\n⚠️ ${result.error}` : "";
+      const error = result.error ? `\n⚠️ ${result.error.replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 80)}` : "";
       await sendHTML(`${icon} <b>${name}</b>\nStatus: ${status} (${latency})${error}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});

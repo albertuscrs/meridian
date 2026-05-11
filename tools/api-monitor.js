@@ -126,11 +126,12 @@ export async function checkAllApis() {
 }
 
 export function formatApiStatus(results) {
+  const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const lines = results.map((r) => {
     const icon = r.ok ? "✅" : "❌";
     const latency = r.latency ? `${r.latency}ms` : "?";
     const status = r.status ? `${r.status}` : "timeout";
-    const error = r.error ? `\n    ⚠️ ${r.error}` : "";
+    const error = r.error ? `\n    ⚠️ ${escapeHtml(r.error.slice(0, 80))}` : "";
     return `${icon} ${r.name} — ${status} (${latency})${error}`;
   });
   return lines.join("\n");
