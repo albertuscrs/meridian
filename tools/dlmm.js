@@ -1224,10 +1224,17 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
     if (shouldUseLpAgentRelay()) {
       try {
         if (!silent) log("positions", "Fetching open positions via Agent Meridian relay...");
-        const result = await fetchOpenPositionsFromMeridian({
-          walletAddress,
-          agentId: config.hiveMind.agentId || "agent-local",
-        });
+        // Hard timeout: if relay doesn't respond in 12s, race with timeout rejection
+        const relayTimeout = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("relay hard timeout (12s)")), 12_000)
+        );
+        const result = await Promise.race([
+          fetchOpenPositionsFromMeridian({
+            walletAddress,
+            agentId: config.hiveMind.agentId || "agent-local",
+          }),
+          relayTimeout,
+        ]);
         const normalizedPositions = Array.isArray(result.positions) ? result.positions : [];
         for (const pos of normalizedPositions) {
           const tracked = getTrackedPosition(pos.position);
