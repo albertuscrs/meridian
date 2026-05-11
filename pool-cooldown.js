@@ -36,6 +36,7 @@ export const CLOSE_REASON_UNKNOWN = "unknown";
 export const CLOSE_REASON_LOSS_GT_1_PCT = "loss > 1%";
 export const CLOSE_REASON_OOR_BIG_LOSS = "oor big loss";
 export const CLOSE_REASON_CUMULATIVE_LOSS = "cumulative loss > $5";
+export const CLOSE_REASON_R8_HELD = "r8 held";
 
 // ─── Load / Save ───────────────────────────────────────────────
 
@@ -83,6 +84,10 @@ function isLowYieldCloseReason(reason) {
   return text.includes("low yield");
 }
 
+function isR8HeldCloseReason(reason) {
+  return String(reason || "").toLowerCase().includes("r8 held");
+}
+
 function isManualCloseReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
   return text === "manual" || text === "user requested";
@@ -127,6 +132,9 @@ export function getCooldownHoursForReason(reason) {
   }
   if (isCumulativeLossCloseReason(reason)) {
     return mgmt.cumulativeLossCooldownHours ?? 48;
+  }
+  if (isR8HeldCloseReason(reason)) {
+    return mgmt.r8OorCooldownHours ?? 6;
   }
   return mgmt.defaultCooldownHours ?? 4;
 }

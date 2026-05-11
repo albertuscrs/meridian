@@ -263,6 +263,29 @@ export async function runManagementCycle({ silent = false } = {}) {
       return { ...p, recall: recallForPool(p.pool) };
     });
 
+    // ── R8: Pre-fetch indicator data for OOR positions ─────────────
+    const indicatorData = new Map();
+    if (config.management.r8IndicatorCheck && config.indicators.enabled) {
+      const { confirmIndicatorPreset } = await import("./tools/chart-indicators.js");
+      for (const p of positionData) {
+        if (p.in_range === false && p.base_mint) {
+          try {
+            const result = await confirmIndicatorPreset({
+              mint: p.base_mint,
+              side: "exit",
+              preset: config.management.r8ExitPreset,
+            });
+            indicatorData.set(p.position, result);
+          } catch (e) {
+            log("indicators_warn", `R8 pre-fetch failed for ${p.pair}: ${e.message}`);
+          }
+        }
+      }
+      if (indicatorData.size > 0) {
+        log("cron", `R8: pre-fetched indicators for ${indicatorData.size} OOR position(s)`);
+      }
+    }
+
     // JS trailing TP check
     const exitMap = new Map();
     for (const p of positionData) {
@@ -273,7 +296,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       ) {
         schedulePeakConfirmation(p.position);
       }
-      const exit = updatePnlAndCheckExits(p.position, p, config.management);
+      const exit = updatePnlAndCheckExits(p.position, p, config.management, indicatorData.get(p.position));
       if (exit) {
         if (exit.action === "TRAILING_TP_QUEUED") {
           scheduleTrailingDropConfirmation(p.position);
@@ -1196,6 +1219,7 @@ function formatConfigSnapshot() {
     `OOR: above=${config.management.outOfRangeWaitMinutes}m / below=${config.management.outOfRangeBelowWaitMinutes}m | fast-close >${config.management.outOfRangeBinsToClose} bins | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h | pump gate ${config.management.minProfitPctToCloseOOR}%`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m | close profile: ${config.management.closeProfile}`,
+    `R8: ${config.management.r8IndicatorCheck ? "on" : "off"} | preset ${config.management.r8ExitPreset} | cooldown ${config.management.r8OorCooldownHours}h`,
     `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl} | vol ${config.screening.minVolatility ?? 0}-${config.screening.maxVolatility ?? "∞"} | fee/tvl ${config.screening.minFeeActiveTvlRatio}-${config.screening.maxFeeActiveTvlRatio ?? "∞"}%`,
     `GMGN interval: ${config.gmgn.interval} | OrderBy: ${config.gmgn.orderBy} | Dir: ${config.gmgn.direction}`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
@@ -1271,6 +1295,9 @@ function settingValue(key) {
     rsiLength: config.indicators.rsiLength,
     indicatorIntervals: config.indicators.intervals,
     requireAllIntervals: config.indicators.requireAllIntervals,
+    r8IndicatorCheck: config.management.r8IndicatorCheck,
+    r8ExitPreset: config.management.r8ExitPreset,
+    r8OorCooldownHours: config.management.r8OorCooldownHours,
   };
   return values[key];
 }
@@ -1364,6 +1391,14 @@ function renderSettingsMenu(page = "main") {
         settingButton(`pecut${config.management.closeProfile === "pecut" ? " ✓" : ""}`, "cfg:set:closeProfile:pecut"),
         settingButton(`experimental${config.management.closeProfile === "experimental" ? " ✓" : ""}`, "cfg:set:closeProfile:experimental"),
       ],
+      [toggleButton("r8IndicatorCheck", "R8 indicator check")],
+      [
+        settingButton(`R8: ST${config.management.r8ExitPreset === "supertrend_break" ? " ✓" : ""}`, "cfg:set:r8ExitPreset:supertrend_break"),
+        settingButton(`RSI${config.management.r8ExitPreset === "rsi_reversal" ? " ✓" : ""}`, "cfg:set:r8ExitPreset:rsi_reversal"),
+        settingButton(`BB+RSI${config.management.r8ExitPreset === "bb_plus_rsi" ? " ✓" : ""}`, "cfg:set:r8ExitPreset:bb_plus_rsi"),
+        settingButton(`ST/RSI${config.management.r8ExitPreset === "supertrend_or_rsi" ? " ✓" : ""}`, "cfg:set:r8ExitPreset:supertrend_or_rsi"),
+      ],
+      inputButton("r8OorCooldownHours", "R8 cooldown hrs"),
     ];
   } else if (page === "screen") {
     rows = [
@@ -1586,6 +1621,7 @@ function categorizeCloseReason(reason) {
   if (r.includes("stop loss")) return "Stop loss";
   if (r.includes("rule 3") || r.includes("pumped")) return "Pump (R3)";
   if (r.includes("take profit")) return "Take profit";
+  if (r.includes("r8 held")) return "R8-held";
   if (r.includes("oor") || r.includes("out of range")) return "OOR";
   if (r.includes("manual")) return "Manual";
   return "Other";
@@ -1594,7 +1630,7 @@ function categorizeCloseReason(reason) {
 async function parseLogDates(dates) {
   const logsDir = new URL("./logs", import.meta.url).pathname;
   const closedPositions = [], exitAlerts = [];
-  let errorCount = 0, safetyLockCount = 0, pumpHoldCount = 0;
+  let errorCount = 0, safetyLockCount = 0, pumpHoldCount = 0, r8HoldCount = 0;
   for (const dateStr of dates) {
     try {
       const rl = readline.createInterface({ input: createReadStream(`${logsDir}/agent-${dateStr}.log`), crlfDelay: Infinity });
@@ -1604,6 +1640,7 @@ async function parseLogDates(dates) {
         if (/\[ERROR\]/.test(line)) errorCount++;
         if (/Safety-Lock:/.test(line)) safetyLockCount++;
         if (/Pump-Hold:/.test(line)) pumpHoldCount++;
+        if (/R8 hold:/.test(line)) r8HoldCount++;
       }
     } catch {}
     try {
@@ -1622,7 +1659,7 @@ async function parseLogDates(dates) {
       }
     } catch {}
   }
-  return { closedPositions, exitAlerts, errorCount, safetyLockCount, pumpHoldCount };
+  return { closedPositions, exitAlerts, errorCount, safetyLockCount, pumpHoldCount, r8HoldCount };
 }
 
 async function buildObserveReport({ days = 1, details = false } = {}) {
@@ -1633,7 +1670,7 @@ async function buildObserveReport({ days = 1, details = false } = {}) {
     dates.push(d.toISOString().slice(0, 10));
   }
 
-  const { closedPositions, exitAlerts, errorCount, safetyLockCount, pumpHoldCount } = await parseLogDates(dates);
+  const { closedPositions, exitAlerts, errorCount, safetyLockCount, pumpHoldCount, r8HoldCount } = await parseLogDates(dates);
 
   const oorAlerts = exitAlerts.filter(a => /oor|out.of.range/i.test(a.reason));
   const oorAbove  = exitAlerts.filter(a => /OOR above/i.test(a.reason));
@@ -1657,7 +1694,7 @@ async function buildObserveReport({ days = 1, details = false } = {}) {
     "", `<b>OOR exit alerts: ${oorAlerts.length}</b>`,
     `  Above: ${oorAbove.length}`, `  Below: ${oorBelow.length}`,
     `  Trailing-armed closes: ${trailingArmedClosed.length}`,
-    `  Safety-Lock holds: ${safetyLockCount}`, `  Pump-Hold holds: ${pumpHoldCount}`,
+    `  Safety-Lock holds: ${safetyLockCount}`, `  Pump-Hold holds: ${pumpHoldCount}`, `  R8 holds: ${r8HoldCount}`,
   );
 
   if (errorCount > 0) lines.push("", `⚠️ Errors in log: ${errorCount}`);
@@ -1793,6 +1830,14 @@ async function buildObserveHeld() {
           if (!existing || ts > existing.ts)
             holdsByAddr.set(addr, { type: "Pump-Hold", gate: parseFloat(gate), pnl: pnlRaw === "?" ? null : parseFloat(pnlRaw), ts, prof });
         }
+
+        const r8 = line.match(/R8 hold: (\S+) OOR (above|below) for (\d+)m — indicators not confirmed: (.+)/);
+        if (r8) {
+          const [, addr, dir, mins, reason] = r8;
+          const existing = holdsByAddr.get(addr);
+          if (!existing || ts > existing.ts)
+            holdsByAddr.set(addr, { type: "R8-held", direction: dir, minutesOOR: parseInt(mins), reason: reason.trim(), ts });
+        }
       }
     } catch {}
   }
@@ -1825,13 +1870,23 @@ async function buildObserveHeld() {
     if (phEntries.length > 20) lines.push(`  … and ${phEntries.length - 20} more`);
   }
 
+  const r8Entries = [...holdsByAddr.entries()].filter(([, v]) => v.type === "R8-held");
+  if (r8Entries.length > 0) {
+    if (slEntries.length > 0 || phEntries.length > 0) lines.push("");
+    lines.push(`<b>R8-held (${r8Entries.length}):</b>`);
+    for (const [addr, h] of r8Entries.slice(0, 20)) {
+      lines.push(`• <code>${fmtAddr(addr)}</code> — OOR ${h.direction} ${h.minutesOOR}m, ${h.reason}, last hold ${fmtTime(h.ts)}`);
+    }
+    if (r8Entries.length > 20) lines.push(`  … and ${r8Entries.length - 20} more`);
+  }
+
   lines.push("", `Total: ${holdsByAddr.size} unique position${holdsByAddr.size !== 1 ? "s" : ""} held`);
   return lines.join("\n");
 }
 
 async function buildObserveReasons() {
   const today = new Date().toISOString().slice(0, 10);
-  const { closedPositions, safetyLockCount, pumpHoldCount } = await parseLogDates([today]);
+  const { closedPositions, safetyLockCount, pumpHoldCount, r8HoldCount } = await parseLogDates([today]);
   const profile = config.management.closeProfile ?? "main";
 
   if (closedPositions.length === 0)
@@ -1857,12 +1912,14 @@ async function buildObserveReasons() {
     lines.push(`<code>${cat.padEnd(18)} ${bar(n).padEnd(BAR_MAX + 1)}${n}  (${pct}%)</code>`);
   }
 
-  if (safetyLockCount > 0 || pumpHoldCount > 0) {
+  if (safetyLockCount > 0 || pumpHoldCount > 0 || r8HoldCount > 0) {
     lines.push("", "<b>Holds (no close):</b>");
     if (safetyLockCount > 0)
       lines.push(`<code>${"Safety-Lock".padEnd(18)} ${bar(safetyLockCount).padEnd(BAR_MAX + 1)}${safetyLockCount}</code>`);
     if (pumpHoldCount > 0)
       lines.push(`<code>${"Pump-Hold".padEnd(18)} ${bar(pumpHoldCount).padEnd(BAR_MAX + 1)}${pumpHoldCount}</code>`);
+    if (r8HoldCount > 0)
+      lines.push(`<code>${"R8-held".padEnd(18)} ${bar(r8HoldCount).padEnd(BAR_MAX + 1)}${r8HoldCount}</code>`);
   }
 
   return lines.join("\n");
@@ -1890,7 +1947,7 @@ function formatHelpText() {
     "/observe details — trailing-armed OOR closes with pair + PnL",
     "/observe compare — close distribution: baseline vs current period",
     "/observe compare <B> <C> — baseline B days vs current C days",
-    "/observe held — positions held by Safety-Lock or Pump-Hold (last 24h)",
+    "/observe held — positions held by Safety-Lock, Pump-Hold, or R8 (last 24h)",
     "/observe reasons — bar chart of close reasons today",
     "/pool <n> — detailed info for one open position",
     "/close <n> — close one position by index",

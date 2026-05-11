@@ -211,6 +211,10 @@ export const config = {
     // "experimental" — same as pecut + indicator validation, PVP rivalry check
     closeProfile:          u.closeProfile          ?? "main",
     minProfitPctToCloseOOR: u.minProfitPctToCloseOOR ?? 0, // pecut/experimental: min PnL% required before Rule 3 fires
+    // R8: Indicator-Aware OOR Close (experimental profile)
+    r8IndicatorCheck:      u.r8IndicatorCheck      ?? true,  // validate indicators before OOR close
+    r8ExitPreset:          u.r8ExitPreset          ?? "supertrend_break", // indicator preset for R8 exit validation
+    r8OorCooldownHours:    u.r8OorCooldownHours    ?? 6,     // cooldown when R8-held position eventually closes
   },
 
   // ─── Strategy Mapping ───────────────────

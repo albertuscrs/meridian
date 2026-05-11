@@ -388,7 +388,7 @@ export function getStateSummary() {
  * @param {object} mgmtConfig
  * Returns { action, reason } or null if no exit needed.
  */
-export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
+export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig, indicatorData = null) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
   // "main" | "pecut" | "experimental" — governs which variant of each rule applies
   const profile = mgmtConfig.closeProfile ?? "main";
@@ -466,6 +466,14 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
           log("state", `Safety-Lock: ${position_address} OOR above for ${minutesOOR}m but PnL ${currentPnlPct != null ? currentPnlPct.toFixed(2) : "?"}% — holding (profile: ${profile})`);
           return null;
         }
+        // R8: Indicator-Aware OOR Close (experimental only)
+        if (profile === "experimental" && indicatorData && !trailingArmed) {
+          if (!indicatorData.confirmed) {
+            log("state", `R8 hold: ${position_address} OOR above for ${minutesOOR}m — indicators not confirmed: ${indicatorData.reason}`);
+            return null;
+          }
+          log("state", `R8 confirmed: ${position_address} OOR above — ${indicatorData.reason}`);
+        }
         return {
           action: "OUT_OF_RANGE",
           reason: trailingArmed
@@ -482,6 +490,14 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         if ((profile === "pecut" || profile === "experimental") && (currentPnlPct == null || currentPnlPct <= 0)) {
           log("state", `Safety-Lock: ${position_address} OOR below for ${minutesOOR}m but PnL ${currentPnlPct != null ? currentPnlPct.toFixed(2) : "?"}% — holding (profile: ${profile})`);
           return null;
+        }
+        // R8: Indicator-Aware OOR Close (experimental only)
+        if (profile === "experimental" && indicatorData && !trailingArmed) {
+          if (!indicatorData.confirmed) {
+            log("state", `R8 hold: ${position_address} OOR below for ${minutesOOR}m — indicators not confirmed: ${indicatorData.reason}`);
+            return null;
+          }
+          log("state", `R8 confirmed: ${position_address} OOR below — ${indicatorData.reason}`);
         }
         return {
           action: "OUT_OF_RANGE",
