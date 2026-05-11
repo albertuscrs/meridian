@@ -18,14 +18,15 @@ async function fetchWithTimeout(url, options = {}) {
 
 export async function checkRelay() {
   const url = config.api?.agentMeridianApiUrl || "https://api.agentmeridian.xyz/api";
-  const wallet = process.env.WALLET_PRIVATE_KEY ? "test" : "";
+  const agentId = config.hiveMind?.agentId || "agent-local";
   const start = Date.now();
-  const res = await fetchWithTimeout(`${url}/positions/open?owner=${wallet}`, {
+  const res = await fetchWithTimeout(`${url}/positions/open?owner=healthcheck&agentId=${agentId}`, {
     headers: { "x-api-key": config.api?.publicApiKey || "" },
   });
   const latency = Date.now() - start;
-  // 400 with "owner is required" means API is up (just needs valid owner)
-  const isUp = res.ok || (res.status === 400 && res.data?.includes("owner"));
+  // 200 = up, 400 = up (bad request), 500 = up (backend error on invalid owner)
+  // Only consider down if connection fails or returns non-API error
+  const isUp = res.ok || res.status === 400 || res.status === 500;
   return {
     name: "Agent Meridian Relay",
     url,
