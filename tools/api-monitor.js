@@ -18,18 +18,21 @@ async function fetchWithTimeout(url, options = {}) {
 
 export async function checkRelay() {
   const url = config.api?.agentMeridianApiUrl || "https://api.agentmeridian.xyz/api";
+  const wallet = process.env.WALLET_PRIVATE_KEY ? "test" : "";
   const start = Date.now();
-  const res = await fetchWithTimeout(`${url}/v1/positions`, {
+  const res = await fetchWithTimeout(`${url}/positions/open?owner=${wallet}`, {
     headers: { "x-api-key": config.api?.publicApiKey || "" },
   });
   const latency = Date.now() - start;
+  // 400 with "owner is required" means API is up (just needs valid owner)
+  const isUp = res.ok || (res.status === 400 && res.data?.includes("owner"));
   return {
     name: "Agent Meridian Relay",
     url,
     status: res.status,
-    ok: res.ok,
+    ok: isUp,
     latency,
-    error: res.ok ? null : (res.data?.slice(0, 100) || `HTTP ${res.status}`),
+    error: isUp ? null : (res.data?.slice(0, 100) || `HTTP ${res.status}`),
   };
 }
 
