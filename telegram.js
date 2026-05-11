@@ -179,6 +179,7 @@ const BOT_COMMANDS = [
   { command: "pause", description: "Stop autonomous cron cycles" },
   { command: "resume", description: "Resume autonomous cron cycles" },
   { command: "stop", description: "Shut down the agent" },
+  { command: "status", description: "Wallet + positions snapshot, or /status apis for API health" },
 ];
 
 export async function registerBotCommands() {
