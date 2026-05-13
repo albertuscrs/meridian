@@ -1073,10 +1073,7 @@ export async function getPositionPnl({ pool_address, position_address }) {
   const walletAddress = getWallet().publicKey.toString();
   if (shouldUseLpAgentRelay()) {
     try {
-      const payload = await fetchOpenPositionsFromMeridian({
-        walletAddress,
-        agentId: config.hiveMind.agentId || "agent-local",
-      });
+      const payload = await getMyPositions({ force: true, silent: true });
       const p = payload?.positions?.find((position) => position.position === position_address);
       if (p) {
         return {
@@ -1091,7 +1088,7 @@ export async function getPositionPnl({ pool_address, position_address }) {
           upper_bin: p.upper_bin,
           active_bin: p.active_bin,
           age_minutes: p.age_minutes,
-          request_id: payload?.requestId || null,
+          request_id: payload?.request_id || null,
         };
       }
       log("pnl_warn", "Relay positions API did not include requested position; falling back to Meteora PnL path");
@@ -1130,26 +1127,6 @@ function safeNum(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function normalizeRelayPosition(position) {
-  if (!position || typeof position !== "object") return position;
-  if (!config.management.solMode) return position;
-
-  const totalValueNative = position.total_value_native ?? position.total_value_usd;
-  const unclaimedFeesNative = position.unclaimed_fees_native ?? position.unclaimed_fees_usd;
-  const collectedFeesNative = position.collected_fees_native ?? position.collected_fees_usd;
-  const pnlNative = position.pnl_native ?? position.pnl_usd;
-  const derivedPnlPct = position.pnl_pct_derived_native ?? position.pnl_pct_derived;
-
-  return {
-    ...position,
-    total_value_usd: totalValueNative,
-    unclaimed_fees_usd: unclaimedFeesNative,
-    collected_fees_usd: collectedFeesNative,
-    pnl_usd: pnlNative,
-    pnl_pct_derived: derivedPnlPct,
-  };
-}
-
 function deriveOpenPnlPct(binData, solMode = false) {
   if (!binData) return null;
 
@@ -1186,23 +1163,28 @@ function deriveLpAgentPnlPct(lpData, solMode = false) {
   return (pnl / deposit) * 100;
 }
 
-async function fetchOpenPositionsFromMeridian({ walletAddress, agentId }) {
+async function fetchRawOpenPositionsFromMeridian({ walletAddress, agentId }) {
   const search = new URLSearchParams({
     owner: walletAddress,
     agentId: agentId || "agent-local",
   });
-  const payload = await meridianJson(`/positions/open?${search.toString()}`, {
+  const payload = await meridianJson(`/positions/open/raw?${search.toString()}`, {
     headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
     retry: {
       maxElapsedMs: 15_000,  // Increased from 8s to 15s
       perAttemptTimeoutMs: 8_000,  // Increased from 5s to 8s
     },
   });
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const byPosition = {};
+  for (const row of rows) {
+    const addr = row?.position || row?.id || row?.tokenId;
+    if (addr) byPosition[addr] = row;
+  }
   return {
     ...payload,
-    positions: Array.isArray(payload?.positions)
-      ? payload.positions.map((position) => normalizeRelayPosition(position))
-      : [],
+    data: rows,
+    byPosition,
   };
 }
 
@@ -1221,36 +1203,26 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
   }
 
   _positionsInflight = (async () => { try {
+    let relayLpAgentByPosition = null;
+    let relayRequestId = null;
     if (shouldUseLpAgentRelay()) {
       try {
-        if (!silent) log("positions", "Fetching open positions via Agent Meridian relay...");
+        if (!silent) log("positions", "Fetching raw LPAgent open positions via Agent Meridian relay...");
         // Hard timeout: if relay doesn't respond in 12s, race with timeout rejection
         const relayTimeout = new Promise((_, reject) =>
           setTimeout(() => reject(new Error("relay hard timeout (12s)")), 12_000)
         );
         const result = await Promise.race([
-          fetchOpenPositionsFromMeridian({
+          fetchRawOpenPositionsFromMeridian({
             walletAddress,
             agentId: config.hiveMind.agentId || "agent-local",
           }),
           relayTimeout,
         ]);
-        const normalizedPositions = Array.isArray(result.positions) ? result.positions : [];
-        for (const pos of normalizedPositions) {
-          const tracked = getTrackedPosition(pos.position);
-          pos.strategy = tracked?.strategy ?? null;
-        }
-        syncOpenPositions(normalizedPositions.map((p) => p.position));
-        _positionsCache = {
-          wallet: walletAddress,
-          total_positions: Number(result.total_positions || 0),
-          positions: normalizedPositions,
-          request_id: result.requestId || null,
-        };
-        _positionsCacheAt = Date.now();
-        return _positionsCache;
+        relayLpAgentByPosition = result.byPosition || {};
+        relayRequestId = result.requestId || result.request_id || null;
       } catch (error) {
-        log("positions_warn", `Agent Meridian relay failed; falling back to Meteora/local positions path: ${error.message}`);
+        log("positions_warn", `Agent Meridian raw relay failed; falling back to direct LPAgent fetch: ${error.message}`);
       }
     }
 
@@ -1270,7 +1242,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
     const binDataByPool = {};
     const pnlMaps = await Promise.all(pools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
     pools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
-    const lpAgentByPosition = await fetchLpAgentOpenPositions(walletAddress);
+    const lpAgentByPosition = relayLpAgentByPosition || await fetchLpAgentOpenPositions(walletAddress);
 
     const positions = [];
     for (const pool of pools) {
@@ -1403,7 +1375,12 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
       }
     }
 
-    const result = { wallet: walletAddress, total_positions: positions.length, positions };
+    const result = {
+      wallet: walletAddress,
+      total_positions: positions.length,
+      positions,
+      request_id: relayRequestId,
+    };
     syncOpenPositions(positions.map(p => p.position));
     _positionsCache = result;
     _positionsCacheAt = Date.now();
