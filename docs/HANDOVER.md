@@ -1,7 +1,7 @@
 # Meridian DLMM Agent — Handover Document
-**Date:** 2026-05-10
+**Date:** 2026-05-13
 **Branch:** experimental
-**Status:** Merge in-progress, bot still running stable from in-memory code
+**Status:** Stable — all merges complete, bot running
 
 ---
 
@@ -11,504 +11,814 @@ This is a **personal fork** of an open-source DLMM LP agent (Meridian).
 
 - **My fork (origin):** https://github.com/albertuscrs/meridian
 - **Upstream owner:** https://github.com/yunus-0x/meridian
-- **My local commit:** `3cd16a3` (checkpoint: sync working state with upstream/experimental)
-- **Current state:** MERGE IN-PROGRESS, 7 files have unresolved conflict markers
-- **Bot status:** Still running from memory (started May 7, 21:30 UTC, 3+ days uptime). DO NOT RESTART until conflicts resolved and syntax verified.
+- **Current HEAD:** `2837752` (merge: integrate upstream relay enrichment refactor)
+- **Bot status:** Running stable, profile=pecut, model=mimo-v2.5 (screening), MiniMax-M2.7 (management)
 
-### Why merge was attempted
-1 week of personal R-implementations were verified working in production. Upstream owner pushed 11 new commits to their experimental branch (PM2 fixes, volatility precision, Discord signals, etc). Attempted merge to integrate owner's improvements while preserving my work. **Hit conflicts in 7 files but did not abort.**
+### Git History (Recent)
 
----
-
-## ✅ WHAT HAS BEEN DONE (Complete History)
-
-### Phase 1: Closing Rules Refactor (R1-R10) — ALL VERIFIED IN PRODUCTION
-
-The agent has a closing-rules engine with 5 rules and 3 profile variants:
-- **Main** (Deterministic) — current default
-- **Pecut** (3s confirm, profit gates, Safety-Lock) — currently active in production
-- **Experimental** (HiveMind sync, indicator validation, PVP rivalry) — dormant
-
-| Rule | Profile | Implementation | Status |
-|------|---------|----------------|--------|
-| R1 Stop Loss | All | Hard floor PnL ≤ stopLossPct | ✅ Production |
-| R2 Trailing TP | Main | 15s confirm window | ✅ Production |
-| R2 Trailing TP | Pecut | 3s confirm window (R4) | ✅ Production |
-| R3 Pump Above | Main | Instant close on bin gap | ✅ Production |
-| R3 Pump Above | Pecut/Exp | minProfitPctToCloseOOR gate (R5) | ✅ Production |
-| R4 OOR Stale | Main | Time-based (35m above / 8m below) | ✅ Production |
-| R4 OOR Stale | Pecut/Exp | Safety-Lock — hold if PnL ≤ 0 (R7) | ✅ Production |
-| R5 Low Yield | All | minAgeBeforeYieldCheck (R9 fix) | ✅ Production |
-| R10 OOR consolidation | All | state.js single source for OOR | ✅ Production |
-| R4.1 Trailing path consolidation | All | Single timer-based path (no instant bypass) | ✅ Production |
-
-**Key innovations:**
-1. **closeProfile config field** — toggle "main"/"pecut"/"experimental" via Telegram
-2. **Pre-fetch architecture** — keeps state.js sync, async work in index.js
-3. **Pump-Hold gate** — prevents premature exits on price pumps without realized profit
-4. **Safety-Lock** — holds positions through OOR timeout when unprofitable
-5. **Hard-bypass for risk-critical exits** — OOR + trailing armed skips LLM round-trip
-6. **Profile-aware confirmation windows** — 3s pecut, 15s main/experimental
-
-### Phase 2: Production Verification Evidence
-
-**R7 Safety-Lock (verified 2026-05-05):**
-- Position GqWLvoXcMJ4FaMjZgZZgfju3HG3LXV6AW1bsnheX5zLr at 0% PnL successfully held through 35m OOR window
-- Recovered to +0.72% PnL before close
-- Without R7, would have closed at break-even or slight loss
-
-**R5 Pump-Hold (verified 2026-05-06):**
-- 17 hold occurrences across 2 unique positions (avg 8.5 polls per position before close)
-- Pattern: pump detected → PnL < gate → hold → PnL recovers → close at higher PnL
-- 4 Pump R3 closes that day, all profitable
-
-**R4.1 Trailing TP consolidation (verified 2026-05-07):**
-- 3 confirmed trailing TP closes via 3000ms confirmation window
-- 2 fakeout rejections — saved positions from premature close
-- Example: position dropped to PnL 2.66%, 3s window detected reversal to 2.89%, REJECTED close
-- 53 seconds later, real drop occurred and CONFIRMED close
-
-**/observe sub-commands:**
-- `/observe` — daily snapshot (closes, holds, errors)
-- `/observe held` — current Safety-Lock and Pump-Hold positions
-- `/observe reasons` — distribution histogram with bar chart
-- `/observe compare` — baseline vs current period (auto-detect profile change boundary)
-
-### Phase 3: Cooldown Investigation & Tuning
-
-**Investigation findings (2026-05-08):**
-- 8 cooldown reason branches in `pool-cooldown.js`
-- Rule 3 (pump close) gets 1h cooldown — appropriate
-- **Real issue:** `repeatDeployCooldownHours = 12h` token-wide cooldown after 3 successful fee-generating deploys — penalizes momentum pools
-
-**Tuning applied:**
-- `repeatDeployCooldownHours`: 12 → 2
-- `repeatDeployCooldownMinFeeEarnedPct`: 0 → 1
-- Rationale: ANDV-SOL case study showed 3 sequential profitable deploys with declining-but-strong fee/TVL (6.85% → 5.29% → 2.45%, all above 0.15% threshold). 12h token-wide cooldown was missing continuation pumps.
-
-### Phase 4: R8 Investigation Complete (NOT Implemented Yet)
-
-R8 = Indicator-Aware OOR Close for "experimental" profile.
-
-**Investigation found (2026-05-09):**
-- `confirmIndicatorPreset({ side: "exit" })` already exported in `tools/chart-indicators.js`
-- Exit logic for all 7 presets already implemented
-- Fail-open semantics baked in (skipped: true → confirmed: true → close as normal)
-- Latency ~1.2s per pool (acceptable for Rule 4 trigger frequency)
-- 🟢 **Easy tier** implementation, ~67 lines across 4 files
-
-**Implementation decisions LOCKED (ready to apply):**
-- Scope: BOTH OOR above AND below
-- Trailing armed: SKIP R8 (locking profit, indicators irrelevant)
-- Architecture: Pre-fetch in index.js (async), sync gate in state.js Rule 4
-- Default exit preset: `supertrend_break` (configurable via `config.indicators.exitPreset`)
-- Failure mode: Fail-open (Rule 4 time-based close is the safety fallback)
-- Gate order in Rule 4: Safety-Lock (R7) first → R8 indicator check → OUT_OF_RANGE close
-
-### Phase 5: Security Hardening
-
-- Wallet keys backed up to `~/secure-backup/` (outside repo)
-  - `private_key.pem.backup` (chmod 600)
-  - `public_key.pem.backup` (chmod 600)
-- `.gitignore` strict — excludes `*.pem`, `private_key*`, `public_key*`, state backups, `*.bak`, `*.save`, `.claude/`, `10000`
-- Verified `private_key.pem` and `public_key.pem` never committed to history
-- `.claude/settings.local.json` ignored via global git config
-
-### Phase 6: Fork Setup
-
-- Forked `yunus-0x/meridian` to `albertuscrs/meridian` (full branches: main + experimental)
-- Renamed local remote: `origin` (was upstream owner) → `upstream`
-- Added `origin` pointing to my fork
-- Local commit `3cd16a3` made (checkpoint of working state)
-- Push attempted but **rejected** — fork has owner's later commits that local doesn't
-
-### Phase 7: Documentation
-
-`docs/CLOSE_RULES_REFACTOR.md` exists with:
-- Full R1-R10 spec and implementation status
-- Production verification evidence
-- Architecture notes
-- Decision log
-- Glossary (Pecut, Hard Floor, Safety-Lock, HiveMind, etc.)
-
----
-
-## ⚠️ CURRENT BLOCKER — MERGE CONFLICTS UNRESOLVED
-
-### Git State
-
-HEAD: 3cd16a3 (my checkpoint commit)
-upstream/experimental: d342b7c (older, before owner's recent work)
-origin/experimental: 71be9bc (fork with owner's 11 new commits)
-Merge attempt: git merge origin/experimental
-Result: 7 conflicts, NOT aborted, NOT resolved
-
-### Conflict Files (UNRESOLVED, MARKERS PRESENT)
-| File | Risk |
-|------|------|
-| `CLAUDE.md` | 🟡 Docs only |
-| `config.js` | 🔴 SyntaxError — has my closeProfile config |
-| `index.js` | 🔴 SyntaxError — has R3, R5, R7 logic |
-| `tools/definitions.js` | 🟡 Reports OK syntax (suspicious — verify) |
-| `tools/executor.js` | 🔴 SyntaxError — has CONFIG_MAP additions for R5 |
-| `tools/dlmm.js` | 🔴 SyntaxError |
-| `user-config.example.json` | 🟡 Template only |
-
-### Auto-Merged Files (NEED AUDIT — silent overwrite risk)
-| File | Why audit |
-|------|-----------|
-| `tools/screening.js` | Owner has volatility precision changes; my R-logic might be silently overwritten |
-| `tools/gmgn.js` | Stage4 indicator logic — verify untouched |
-| `cli.js`, `setup.js`, `prompt.js` | Owner refactor, low risk |
-| `package.json` | Dependency changes? |
-| `ecosystem.config.cjs` | NEW — PM2 config from owner |
-| `README.md`, `gmgn-config.example.json` | Low risk |
-
-### Owner's 11 Commits Pending Integration
-
-71be9bc Enrich Discord signal launchpads before filtering ← NEW FEATURE
-00a9b7f Recognize PM2 entrypoint path
-7f52a4d Harden graceful shutdown under PM2
-171c917 Fix PM2 restart handling
-8f9a4f1 Use screening timeframe for longer volatility windows
-ab9bff1 Preserve 30m volatility precision
-bc17c45 Use 30m volatility for Meteora screening
-99fb060 Guard DLMM deploy range and screening
-220255a docs: correct HiveMind README details
-2e76b25 docs: add Meridian socials and agent harness
-73d366c fix: enforce screening thresholds before deploy
-
----
-
-## 📋 WHAT NEEDS TO BE DONE — RESUME PLAN
-
-### Phase A: Investigation (do FIRST, ~15-30 minutes)
-
-Map every R-implementation across local vs upstream. Run these commands and analyze:
-
-```bash
-echo "▶ R7 Safety-Lock"
-git show HEAD:state.js | grep -n "Safety-Lock"
-git show origin/experimental:state.js | grep -n "Safety-Lock"
-
-echo "▶ R5 Pump-Hold"
-git show HEAD:index.js | grep -n "Pump-Hold"
-git show origin/experimental:index.js | grep -n "Pump-Hold"
-
-echo "▶ R5 minProfitPctToCloseOOR"
-git show HEAD:config.js | grep -n "minProfitPctToCloseOOR"
-git show origin/experimental:config.js | grep -n "minProfitPctToCloseOOR"
-
-echo "▶ R4.1 windowLabel + TRAILING_TP_QUEUED"
-git show HEAD:state.js | grep -n "windowLabel\|TRAILING_TP_QUEUED"
-git show origin/experimental:state.js | grep -n "windowLabel\|TRAILING_TP_QUEUED"
-git show HEAD:index.js | grep -n "TRAILING_DROP_CONFIRM_DELAY_MS_PECUT"
-git show origin/experimental:index.js | grep -n "TRAILING_DROP_CONFIRM_DELAY_MS_PECUT"
-
-echo "▶ R3 bins_above + Rule 3 tolerance"
-git show HEAD:index.js | grep -n "bins_above\|binsAbove"
-git show origin/experimental:index.js | grep -n "bins_above\|binsAbove"
-
-echo "▶ closeProfile (R1+R2 foundation)"
-git show HEAD:config.js | grep -n "closeProfile"
-git show origin/experimental:config.js | grep -n "closeProfile"
-git show HEAD:state.js | grep -n "closeProfile"
-git show origin/experimental:state.js | grep -n "closeProfile"
-
-echo "▶ R10 trailing-armed OOR"
-git show HEAD:state.js | grep -n "trailing armed\|trailingArmed"
-git show origin/experimental:state.js | grep -n "trailing armed\|trailingArmed"
+```
+2837752 merge: integrate upstream relay enrichment refactor
+016f239 Move relay position enrichment into bot (upstream)
+b022962 feat: R8 indicator-aware OOR close for experimental profile
+01d442d fix: add agentId to relay health check
+4b964df fix: add hard timeout for relay position fetch
+48ade49 fix: increase relay timeout for position fetch
+37be09e fix: correct GMGN API check endpoint
+397fc80 fix: correct relay health check endpoint
+4e5d741 fix: escape HTML in API status messages for Telegram
+fab18e3 feat: add /status to Telegram bot command menu
+528d79b feat: add API monitoring and /status subcommands
+416d226 fix: add launchpad filtering to GMGN screening pipeline
+56c04ee merge: integrate upstream/experimental + preserve R-implementations
 ```
 
-For each R-implementation, decide:
-- ✅ Only in mine → Keep Yours during conflict resolution
-- ⚠️ In both (parallel implementation) → Manual merge needed
-- 🔴 Mine present, upstream has conflicting logic → Critical decision
+---
 
-### Phase B: Audit Auto-Merged Files (~15 minutes)
+## ✅ COMPLETED WORK
 
-Critical to do this — auto-merge can silently overwrite logic:
+### 1. Merge with Upstream (DONE)
 
-```bash
-# Check tools/screening.js — most critical
-grep -n "minProfitPctToCloseOOR\|Safety-Lock\|Pump-Hold\|profile" tools/screening.js
-git show HEAD:tools/screening.js | grep -n "minProfitPctToCloseOOR\|Safety-Lock"
-
-# Check tools/gmgn.js
-grep -n "indicator\|Stage4" tools/gmgn.js | head -20
-
-# Diff the post-merge state vs my checkpoint for staged-but-merged files
-for f in tools/screening.js tools/gmgn.js cli.js setup.js prompt.js package.json; do
-  echo "=== $f ==="
-  git diff HEAD -- "$f" | head -40
-done
-```
-
-If auto-merge silently dropped any R-logic, must manually re-add or unstage and resolve as conflict.
-
-### Phase C: Conflict Resolution Strategy Per File
-
-Based on Phase A findings, decide per file:
-
-| File | Likely Strategy | Reason |
-|------|----------------|--------|
-| `CLAUDE.md` | Manual merge | Both have docs additions |
-| `user-config.example.json` | Manual merge | Both have new config example fields |
-| `config.js` | Manual merge | Mine: closeProfile, R5 config. Theirs: PM2, volatility settings |
-| `tools/definitions.js` | Manual merge or Keep Theirs | Verify if mine has tool changes |
-| `tools/executor.js` | Manual merge | Mine: CONFIG_MAP for R5/closeProfile. Theirs: ? |
-| `tools/dlmm.js` | Manual merge | Mine: bins_above logic? Theirs: deploy guard. CRITICAL |
-| `index.js` | Manual merge | LARGEST FILE. Mine: massive R-logic. Theirs: PM2 + screening. CRITICAL |
-
-### Phase D: Resolve Conflicts Sequentially
-
-For each file:
-1. Open conflict markers
-2. Apply strategy from Phase C
-3. Save file
-4. `node --check <file>` to verify syntax
-5. `grep "^<<<<<<<" <file>` to verify no markers left
-6. `git add <file>` to mark resolved
-7. Move to next file
-
-DO NOT commit until all 7 files resolved + audit auto-merged files complete.
-
-### Phase E: Commit Merge
-
-```bash
-# Final verification
-git status  # All conflicts should be resolved
-git diff --check  # No conflict markers anywhere
-node --check state.js && node --check index.js && node --check config.js && \
-  node --check tools/dlmm.js && node --check tools/executor.js && \
-  node --check tools/definitions.js && node --check tools/screening.js && \
-  echo "ALL SYNTAX OK"
-
-# Commit merge
-git commit -m "merge: integrate upstream/experimental + preserve R-implementations
-
-Owner improvements integrated:
+Successfully merged owner's 11+ commits while preserving all R-implementations:
 - PM2 process management (4 commits)
 - Volatility precision enhancements (3 commits)
 - Discord signals as launchpad source
 - DLMM deploy guard
 - Pre-deploy screening enforcement
+- Relay enrichment refactor (commit 016f239)
 
-Personal R-implementations preserved:
-- R1+R2: closeProfile foundation (main/pecut/experimental)
-- R3: bins_above tolerance for Rule 3 pump-close
-- R4: 3s trailing confirm window for pecut
-- R4.1: trailing TP path consolidation (single timer-based path)
-- R5: minProfitPctToCloseOOR gate (Pump-Hold)
-- R7: Safety-Lock for OOR + unprofitable
-- R10: OOR engine consolidation (state.js single source)
+All 7 conflict files resolved. Auto-merged files audited for silent R-logic loss.
 
-Verified production stability before merge — bot was running
-on these R-implementations with profile=pecut for 1 week."
+### 2. R8: Indicator-Aware OOR Close (DONE)
 
-# Push to fork
-git push origin experimental
-# Auth: username=albertuscrs, password=<GitHub PAT>
+**Commit:** `b022962`
+
+R8 validates chart indicators before closing OOR positions in "experimental" profile. If indicators don't confirm the exit, the position is held longer.
+
+**Files modified:**
+- `config.js` — 3 new fields: `r8IndicatorCheck`, `r8ExitPreset`, `r8OorCooldownHours`
+- `state.js` — R8 gate in Rule 4 (both above/below), `indicatorData` parameter
+- `index.js` — Pre-fetch indicators, /settings UI, /observe R8 parsing
+- `pool-cooldown.js` — `CLOSE_REASON_R8_HELD`, `r8OorCooldownHours` cooldown
+- `tools/executor.js` — CONFIG_MAP for R8 keys
+- `tools/definitions.js` — update_config description
+
+**Config fields:**
+
+| Field | Default | /settings | CONFIG_MAP |
+|-------|---------|-----------|------------|
+| `r8IndicatorCheck` | `true` | ✅ toggle | ✅ |
+| `r8ExitPreset` | `"supertrend_break"` | ✅ 4 preset buttons | ✅ |
+| `r8OorCooldownHours` | `6` | ✅ input | ✅ |
+
+**Gate order (experimental):**
+```
+OOR timeout
+  → trailingArmed? → close immediately
+  → Safety-Lock (R7): pnlPct ≤ 0? → hold
+  → R8: r8ExitPreset confirmed? → hold if not
+  → OUT_OF_RANGE → close
 ```
 
-### Phase F: Restart Bot Carefully
+**Fail-open:** API unavailable → close as normal. Only active for `experimental` profile.
 
-```bash
-# 1. Backup state.json one more time
-cp state.json state.json.backup-pre-restart-$(date +%Y%m%d-%H%M%S)
+### 3. API Monitoring System (DONE)
 
-# 2. Verify current bot state via Telegram /observe (note current positions, holds)
+**Commits:** `528d79b`, `fab18e3`, `4e5d741`, `397fc80`, `01d442d`
 
-# 3. Restart bot screen
-screen -X -S meridian quit
-# Wait 5 seconds
-sleep 5
-# Start fresh
-cd ~/projects/meridian
-screen -S meridian -dm npm start
+**New file:** `tools/api-monitor.js` — checks status of all external APIs.
 
-# 4. Tail logs immediately
-tail -f logs/agent-2026-05-10.log
-# Watch for:
-# - Successful startup
-# - No SyntaxError, no module load errors
-# - Cron cycles starting
-# - PM2-related changes (graceful shutdown handlers, etc.)
+**Telegram commands:**
+```
+/status apis     — check all API status
+/status relay    — check Agent Meridian relay
+/status hivemind — check HiveMind server
+/status gmgn     — check GMGN API
+/status jupiter  — check Jupiter swap API
+/status meteora  — check Meteora DLMM API
+/status rpc      — check Solana RPC
 ```
 
-### Phase G: Post-Restart Verification
+Each shows: ✅/❌ status, HTTP code, latency, error details.
 
-Within first 30 minutes after restart:
-- [ ] Bot starts without errors
-- [ ] All open positions still tracked correctly
-- [ ] Telegram `/observe` returns expected data
-- [ ] Profile still set to pecut (`/settings` or `/observe` shows profile)
-- [ ] Trailing TP closes (if any) show `(window: 3000ms)` log marker
-- [ ] Safety-Lock fires correctly when applicable
-- [ ] Pump-Hold fires correctly when applicable
-- [ ] No duplicate close attempts (R10 still working)
+### 4. GMGN Launchpad Filtering (DONE)
 
-If anything breaks: emergency rollback
-```bash
-git reset --hard 3cd16a3
-cp state.json.backup-pre-restart-* state.json
-screen -X -S meridian quit
-screen -S meridian -dm npm start
+**Commit:** `416d226`
+
+GMGN screening pipeline was missing `blockedLaunchpads` filter. Added to Stage 2 (token info filter).
+
+- `meteora_virtual_curve` added to `allowedLaunchpads` in `user-config.json`
+- `letsbonk.fun` in `blockedLaunchpads` now correctly filtered
+
+### 5. Relay Hard Timeout (DONE)
+
+**Commits:** `4b964df`, `48ade49`
+
+Relay fetch was hanging indefinitely when TCP connection established but server didn't respond.
+
+**Fix:** 12-second `Promise.race` hard timeout around relay call. Falls back to Meteora/local path on timeout.
+
+### 6. Swap Retry with Escalating Slippage (DONE)
+
+**File:** `tools/wallet.js`
+
+Swap retries up to 5 times with escalating slippage:
+| Attempt | Slippage |
+|---------|----------|
+| 1 | 0.5% (50 bps) |
+| 2 | 1.0% (100 bps) |
+| 3 | 2.0% (200 bps) |
+| 4 | 5.0% (500 bps) |
+| 5 | 10.0% (1000 bps) |
+
+Telegram notification on exhaustion: `notifySwapFailure()` in `telegram.js`.
+
+### 7. Xiaomi MiMo for Screening (DONE)
+
+**Config:**
+- Screening: `mimo-v2.5` via `https://token-plan-sgp.xiaomimimo.com/v1`
+- Management: `MiniMax-M2.5` via MiniMax API (`https://api.minimax.io/v1`)
+- Fallback: `stepfun/step-3.5-flash:free` via OpenRouter
+
+**Agent clients (`agent.js`):**
+- `client` (global) — MiniMax API for management/general
+- `getScreeningClient()` — Xiaomi endpoint for screening
+- `getFallbackClient()` — OpenRouter for fallback
+
+### 8. Darwinian Signal Weighting (DOCUMENTED)
+
+**Doc:** `docs/DARWINIAN_SIGNALS.md`
+
+**Known issue:** Feedback loop is broken. `signal_snapshot` is never populated on positions. `getAndClearStagedSignals()` is defined but never called. All weights stuck at 1.0 (defaults).
+
+**Fix needed:** Wire `getAndClearStagedSignals()` into `dlmm.js` deploy flow.
+
+---
+
+## 📋 CURRENT CONFIGURATION
+
+```json
+{
+  "closeProfile": "pecut",
+  "deployAmountSol": 0.25,
+  "maxPositions": 3,
+  "r8IndicatorCheck": true,
+  "r8ExitPreset": "supertrend_break",
+  "r8OorCooldownHours": 6,
+  "repeatDeployCooldownHours": 2,
+  "repeatDeployCooldownMinFeeEarnedPct": 1,
+  "allowedLaunchpads": ["pump.fun", "moonshot", "met-dbc", "meteora_virtual_curve"],
+  "blockedLaunchpads": ["letsbonk.fun"]
+}
 ```
 
-### Phase H: R8 Implementation (After Merge Stable)
+---
 
-Once merge stable for 24-48 hours:
+## 📁 KEY FILES
 
-1. Branch from current state:
-```bash
-   git checkout -b feat/r8-indicator-aware-close
-```
+| File | Purpose |
+|------|---------|
+| `index.js` | Main entry, management cycle, Telegram handlers, close engines |
+| `state.js` | Position state, exit rules, trailing TP, Safety-Lock, R8 gate |
+| `config.js` | All config schema and defaults |
+| `tools/dlmm.js` | DLMM SDK wrapper (deploy, close, positions, PnL) |
+| `tools/screening.js` | Pool discovery pipeline |
+| `tools/executor.js` | Tool dispatch, CONFIG_MAP, update_config |
+| `tools/api-monitor.js` | API health checks |
+| `tools/chart-indicators.js` | RSI/Supertrend/BB indicators (used by R8) |
+| `pool-cooldown.js` | Cooldown system per close reason |
+| `pool-memory.js` | Pool deploy history |
+| `lessons.js` | Performance recording + lesson derivation |
+| `hivemind.js` | HiveMind sync (lessons/presets only) |
+| `telegram.js` | Telegram bot, notifications |
+| `signal-weights.js` | Darwinian signal weighting (broken — see known issues) |
 
-2. Apply R8 implementation per locked decisions:
-   - Both OOR directions (above + below)
-   - Skip when trailingArmed = true
-   - Pre-fetch indicators in index.js (async)
-   - Sync gate in state.js Rule 4
-   - Use `confirmIndicatorPreset({ side: "exit" })` from `tools/chart-indicators.js`
-   - Fail-open default behavior
+---
 
-3. Run T1-T10 inline-predicate tests (defined in previous session)
+## ⚠️ KNOWN ISSUES
 
-4. Push branch to fork (NOT to upstream):
-```bash
-   git push -u origin feat/r8-indicator-aware-close
-```
+### 1. Darwinian Signal Weighting Broken
+`signal_snapshot` never populated on positions. `getAndClearStagedSignals()` defined but never called. Weights stuck at 1.0. Needs wiring into `dlmm.js` deploy flow.
 
-5. Bot stays on `experimental` branch with profile=pecut. R8 dormant.
+### 2. Relay Raw Endpoint
+Upstream changed relay to `/positions/open/raw`. Bot currently falls back to Meteora portfolio API. May need server-side update for raw endpoint to work.
 
-6. Future: when ready, merge feat/r8 → experimental, flip profile to "experimental" with small deployAmountSol, monitor.
+### 3. Jupiter/Meteora API Issues
+Jupiter swap API: timeout errors. Meteora DLMM API: 404 errors. Both external — not bot issues.
+
+### 4. Encryption Key Placeholder
+`.envrypt` contains `replace-with-a-long-local-key` (placeholder). Encrypted keys in `.env` decrypt to garbage. Some keys are in plaintext in `.env` (SCREENING_LLM_API_KEY) or `.env.raw` (all keys).
+
+---
+
+## 🎯 PENDING WORK
+
+### Phase H: R8 Verification (Next)
+- Monitor R8 behavior with `profile=experimental`
+- Check `/observe held` for R8-held positions
+- Verify indicator confirmation logs
+
+### Darwinian Fix
+- Wire `getAndClearStagedSignals()` into `dlmm.js` deploy flow
+- Pass `signal_snapshot` to `trackPosition()` and `recordPerformance()`
+
+### Relay Raw Endpoint
+- Monitor if `/positions/open/raw` starts working (server-side update needed)
+- Current fallback to Meteora portfolio API works fine
 
 ---
 
 ## 🔧 ENVIRONMENT REFERENCE
 
-### Server Info
-- Server: VM `ubuntu@VM-0-3-ubuntu`
-- Project path: `/home/ubuntu/projects/meridian`
-- Wallet keys backup: `/home/ubuntu/secure-backup/`
+### Server
+- VM: `ubuntu@VM-0-3-ubuntu`
+- Path: `/home/ubuntu/projects/meridian`
+- Wallet backup: `/home/ubuntu/secure-backup/`
 
 ### Git Remotes
-
+```
 origin    https://github.com/albertuscrs/meridian.git (my fork)
 upstream  https://github.com/yunus-0x/meridian (owner)
+```
 
-### Active Configuration
-- closeProfile: `pecut`
-- deployAmountSol: 0.25 SOL (small, careful mode)
-- maxPositions: configured (check via Telegram `/settings`)
-- minProfitPctToCloseOOR: 0 (default, no profit gate)
-- repeatDeployCooldownHours: 2 (tuned down from 12)
-- repeatDeployCooldownMinFeeEarnedPct: 1 (tuned up from 0)
-- LLM model: `mimo-v2.5` (lowercase — case-sensitive!)
+### Models
+- Screening: `mimo-v2.5` (Xiaomi Token Plan Singapore)
+- Management: `MiniMax-M2.5` (MiniMax API)
+- Fallback: `stepfun/step-3.5-flash:free` (OpenRouter)
 
-### Key Files
-- `state.js` — position state, exit rules, trailing TP confirmation
-- `index.js` — main bot loop, management cycle, PnL poll, Telegram handlers
-- `config.js` — all config schema
-- `tools/dlmm.js` — DLMM SDK integration
-- `tools/screening.js` — pool screening pipeline
-- `tools/executor.js` — LLM tool execution + CONFIG_MAP
-- `tools/chart-indicators.js` — indicator API wrapper (will be used for R8)
-- `pool-cooldown.js` — cooldown system
-- `pool-memory.js` — pool deploy history
-- `lessons.js` — performance recording + cooldown trigger
-- `hivemind.js` — HiveMind sync (lessons/presets only, NOT close decisions)
+### Cron Intervals
+- Management: every 3 minutes
+- Screening: every 60 minutes
+- PnL poll: every 30 seconds
 
-### Critical Backups
-
+### Backups
+```
 ~/secure-backup/private_key.pem.backup
 ~/secure-backup/public_key.pem.backup
-~/projects/meridian/state.json.backup-pre-r4.1-20260507-001439
-~/projects/meridian/state.json.backup-pre-merge-20260510-011117
-
-### Production Logs Location
-- `logs/agent-YYYY-MM-DD.log` — main runtime log
-- `logs/actions-YYYY-MM-DD.jsonl` — structured action audit trail
+state.json.backup-* (multiple)
+```
 
 ---
 
-## ⚠️ DO NOT DO THESE (Until Conflicts Resolved)
+## 📖 DOCUMENTATION
 
-- ❌ `npm start` (will crash from SyntaxError in conflict files)
-- ❌ Restart bot screen (same reason)
-- ❌ `pm2 restart` if applicable
-- ❌ `git merge --abort` (loses progress, but option if recovery needed)
-- ❌ `git reset --hard` (unless emergency rollback)
-- ❌ Edit conflict files via editor without strategy
-- ❌ `git add -A` then commit (will commit unresolved conflicts)
-- ❌ Force push to upstream (you don't have push rights anyway, but defensive)
-
----
-
-## ✅ SAFE TO DO ANYTIME
-
-- ✅ `git status`, `git log`, `git diff` (read-only)
-- ✅ `git show <ref>:<file>` to inspect file at any commit
-- ✅ `cat`, `less`, `head`, `tail` on files
-- ✅ `node --check <file>` to verify syntax
-- ✅ `grep` patterns
-- ✅ Telegram commands (bot responds from memory)
-- ✅ Read logs
+- `docs/CLOSE_RULES_REFACTOR.md` — R1-R10 spec and implementation status
+- `docs/DARWINIAN_SIGNALS.md` — Darwinian signal weighting system
+- `docs/HANDOVER.md` — This file
+- `docs/pool-cooldown-plan.md` — Cooldown enhancement plan
+- `docs/hivemind-reference.md` — HiveMind reference
+- `docs/hivemind-summary.md` — HiveMind summary
 
 ---
 
 ## 🎯 SUCCESS CRITERIA
 
 The handover is successful when:
-1. All 7 conflict files resolved with R-implementations preserved
-2. All 9 auto-merged files audited (no silent R-logic loss)
-3. Syntax check passes on all .js files
-4. Merge commit created with detailed message
-5. Push to fork (origin) succeeds
-6. Bot restarts cleanly
-7. First 30 minutes post-restart show no errors
-8. R-implementations still function (trailing 3s window, Safety-Lock, Pump-Hold)
-9. Owner improvements integrated (PM2, Discord signals, etc.)
-10. Branch `feat/r8-indicator-aware-close` ready for R8 implementation
+1. ✅ All conflict files resolved with R-implementations preserved
+2. ✅ Auto-merged files audited (no silent R-logic loss)
+3. ✅ Syntax check passes on all .js files
+4. ✅ Merge commits created with detailed messages
+5. ✅ Push to fork (origin) succeeds
+6. ✅ Bot restarts cleanly
+7. ✅ R8 implemented and committed
+8. ✅ API monitoring system working
+9. ✅ Upstream relay enrichment integrated
 
 ---
 
 ## 📞 IF STUCK
 
-If at any point recovery is needed:
-
 ```bash
 # Nuclear option — abort merge, return to checkpoint
 git merge --abort
 # Working tree returns to commit 3cd16a3
-# All R-implementations preserved
-# 11 owner commits NOT integrated
-# Can re-attempt merge later
 
 # Or full reset
 git reset --hard 3cd16a3
-cp state.json.backup-pre-merge-20260510-011117 state.json
+cp state.json.backup-pre-merge-* state.json
 
 # Bot can restart safely from checkpoint state
 ```
-
-The checkpoint commit `3cd16a3` is the safety net. Everything before that is preserved on disk and pushable to fork (after `--force-with-lease` if needed, since fork has owner commits ahead).
 
 ---
 
 ## 🤖 CONTEXT FOR NEW AI ASSISTANT
 
-If you're a new AI session reading this:
-
-1. The user has been working with Claude (Sonnet) for ~2 weeks on R1-R10 refactor
-2. All R-implementations were verified in production with logs/data evidence
-3. The user is doing a model migration (Claude → MiMo) mid-merge
-4. Treat the user's R-implementations as production-critical assets — DO NOT lose them in merge
-5. The user prefers data-driven decisions and step-by-step verification
-6. Bot still running from memory means there is buffer time, but DON'T let the user accidentally restart bot before merge complete
-7. Read `docs/CLOSE_RULES_REFACTOR.md` in repo for full historical context
-8. Resume with Phase A (Investigation) above
+1. User has been working on R1-R10 refactor for ~2 weeks
+2. All R-implementations verified in production with logs/data evidence
+3. R8 (Indicator-Aware OOR Close) implemented and committed
+4. Merge with upstream complete — relay enrichment refactor integrated
+5. API monitoring system operational via Telegram `/status` commands
+6. Bot running stable with profile=pecut, model=mimo-v2.5
+7. Darwinian signal weighting system is broken (needs fix)
+8. Relay raw endpoint may need server-side update
+9. User prefers data-driven decisions and step-by-step verification
+10. Read `docs/CLOSE_RULES_REFACTOR.md` for full R1-R10 context
+11. Read `docs/DARWINIAN_SIGNALS.md` for signal weighting context
 
 Good luck.
 
+---
+
+## 🎯 PHASE H: R8 VERIFICATION & EXPERIMENTAL PROFILE ACTIVATION
+
+**Status:** PENDING — Next priority
+**Date added:** 2026-05-13
+**Goal:** Verify R8 (indicator-aware OOR close) in production by activating
+`closeProfile=experimental` with small capital exposure.
+
+### Why This Phase Exists
+
+R8 was implemented and tested via inline-predicate tests (T1-T10 all pass),
+but inline tests cannot verify:
+- Real indicator API latency under load
+- Async pre-fetch race conditions with state mutations
+- Indicator fail-open behavior with real API failures
+- Integration with R7 Safety-Lock gate ordering
+- Whether `supertrend_break` exit preset gives sensible hold/close decisions on real market data
+
+Production verification is required before considering experimental profile stable.
+
+### Pre-flight Checklist
+
+Run before flipping profile:
+
+- [ ] Backup `state.json` to `state.json.backup-pre-r8-activation-YYYYMMDD-HHMMSS`
+- [ ] Confirm `closeProfile` currently = `pecut` via `/observe` or `/settings`
+- [ ] Set `deployAmountSol` ≤ 0.25 (small exposure)
+- [ ] Set `maxPositions` ≤ 3 (limit blast radius)
+- [ ] Confirm `r8IndicatorCheck = true` in config
+- [ ] Confirm `r8ExitPreset = "supertrend_break"` (default)
+- [ ] Confirm `r8OorCooldownHours = 6`
+- [ ] Confirm 0 active positions OR all active positions can be closed naturally first
+- [ ] Available 4-6 hours after flip for monitoring
+- [ ] Market relatively calm (avoid flip during major volatility spike)
+
+### Activation Steps
+
+/settings → flip closeProfile from pecut → experimental
+Verify settings summary: "profile: experimental"
+Note flip timestamp for /observe compare boundary detection
+Set timer for first check at +1 hour, +4 hours, +12 hours, +24 hours
+
+
+### Monitoring Routine
+
+#### First 4 Hours (Intensive)
+
+Every 60-90 minutes, run via Telegram:
+/observe
+/observe held
+/status apis
+
+What to watch:
+- ✅ Errors counter stays 0 (or only known non-related errors)
+- ✅ R8-Hold counter > 0 (indicates R8 gate triggered at least once)
+- ✅ Positions deploy successfully (R8 doesn't block entry)
+- ⚠️  R8-Hold positions with extended duration (>2 hours) — investigate
+- 🔴 Any indicator API errors in logs
+
+Log greps:
+```bash
+# R8 activations today
+grep "R8-Hold:" logs/agent-$(date +%Y-%m-%d).log
+
+# Indicator API failures
+grep -E "indicator.*error|chart-indicators.*error|confirmIndicatorPreset.*error" logs/agent-$(date +%Y-%m-%d).log
+
+# R8 fail-open events (API down, close as normal)
+grep -E "R8.*fail-open|indicator.*unavailable" logs/agent-$(date +%Y-%m-%d).log
+```
+
+#### 4-24 Hours (Standard Monitoring)
+
+Every 4-6 hours:
+- `/observe compare` — baseline (pecut last 2-3 days) vs current (experimental)
+- `/observe reasons` — distribution shift?
+- `/observe held` — track R8-Hold positions
+
+Expectations:
+- R8-Hold count may be low (only fires when OOR + indicators say "hold")
+- Total closes/day may be lower than pecut (R8 holds some that would have closed)
+- PnL distribution may shift toward fewer but better closes (or worse if indicators wrong)
+
+#### 24-48 Hours (Verdict)
+
+Decision matrix:
+
+| Pattern | Verdict | Action |
+|---------|---------|--------|
+| R8-Hold fires 2-10x/day, captured held → recovery, PnL net better/same vs pecut | 🟢 KEEP | Continue experimental, consider scale up |
+| R8-Hold fires but positions still close at loss (indicators wrong) | 🟡 TUNE | Try different `r8ExitPreset` (rsi_reversal, bollinger_reversion, etc.) |
+| R8-Hold rarely fires (<1/day) | 🟡 NEUTRAL | Indicators rarely confirm hold — R8 marginal benefit, consider revert |
+| Errors elevated, positions stuck, PnL clearly worse | 🔴 REVERT | Flip back to pecut, investigate logs, fix before re-attempt |
+
+### Red Flag Triggers (Immediate Revert)
+
+Flip back to `pecut` if any of these occur:
+
+1. **R8-Hold positions stuck unprofitable** with PnL falling -5% to -10% while held
+2. **Indicator API errors >10/hour** — fail-open works, but suggests API issues
+3. **Position deploy stops** — investigate immediately
+4. **Bot crash or memory leak** post-flip
+5. **R8 gate logic bug** evident from logs (e.g., R8 firing for non-experimental profile)
+
+Revert via Telegram:
+/settings → flip closeProfile experimental → pecut
+
+Bot processes existing experimental-profile positions through whatever close rule fires
+(R7 Safety-Lock still active, R8 simply stops being evaluated).
+
+### R8 Tuning Parameters
+
+If R8 works but suboptimal, tunable parameters:
+
+| Param | Default | Options to try |
+|-------|---------|----------------|
+| `r8ExitPreset` | `supertrend_break` | `rsi_reversal`, `bollinger_reversion`, `rsi_plus_supertrend`, `supertrend_or_rsi`, `bb_plus_rsi`, `fibo_reclaim`, `fibo_reject` |
+| `r8OorCooldownHours` | 6 | 2-12h depending on hold pattern |
+| `r8IndicatorCheck` | true | false to disable R8 entirely (experimental → behaves like pecut for OOR) |
+
+### Success Metric
+
+R8 verification SUCCESS = 48 hours of `closeProfile=experimental` with:
+- 0 critical errors
+- R8-Hold mechanism fires at least 5 times
+- At least 50% of R8-Hold positions either:
+  - Recover to profit before closing, OR
+  - Close at smaller loss than they would have at OOR-only timeout
+- PnL net (experimental period) ≥ PnL net (pecut baseline, same duration)
+
+After success: consider scale up `deployAmountSol`, continue monitoring 1 week,
+then evaluate making experimental the default profile.
+
+After failure or yellow verdict: document findings, tune `r8ExitPreset` or
+parameters, re-test.
+
+---
+
+## 🗺️ ROADMAP AFTER R8 VERIFICATION
+
+Priority order based on impact × effort × stability:
+
+### Tier 1: Critical Fixes (After R8 Verified)
+
+#### F1: Darwinian Signal Wiring (KNOWN ISSUE)
+**Effort:** Medium (~30-60 lines)
+**Impact:** High (currently 0 — feedback loop broken)
+**Approach:** Wire `getAndClearStagedSignals()` into `tools/dlmm.js` deploy flow.
+Pass `signal_snapshot` through `trackPosition()` → `recordPerformance()` →
+weight evolution. See `docs/DARWINIAN_SIGNALS.md` for full spec.
+
+#### F2: Encryption Key Placeholder (SECURITY)
+**Effort:** Small (~15 minutes)
+**Impact:** High (currently keys partially exposed in plaintext)
+**Approach:** Generate proper encryption key for `.envrypt`, re-encrypt secrets in
+`.env`. Verify decryption works. Delete `.env.raw` if exists.
+
+### Tier 2: Remaining R-Implementations
+
+#### R6: HiveMind Close Decision Sync (ORIGINAL SPEC)
+**Effort:** Large (~150 lines + async coordination)
+**Impact:** Medium (HiveMind currently only stores lessons, not consulted at close)
+**Risk:** High (async network call in hot close path, race conditions, HiveMind
+downtime fallback needed)
+**Prerequisites:**
+- R8 stable for 1+ week
+- HiveMind server uptime/SLA understood
+- Failure mode design (HiveMind down → fail-open like R8? Or fail-closed?)
+
+#### R3: LLM-eval SL Path (ORIGINAL SPEC)
+**Effort:** Medium (~80 lines)
+**Impact:** Low-Medium (current hard SL works well; LLM eval adds nuance but slows)
+**Risk:** Medium (LLM latency at stop-loss moment when speed matters most)
+**Recommendation:** Reconsider necessity. Current Hard Floor SL is fast and works.
+LLM-eval might delay critical exit. May be optional rather than priority.
+
+### Tier 3: Strategic Improvements
+
+#### S1: Aggregate Performance Dashboard
+**Effort:** Medium (~100 lines)
+**Impact:** High (decision making clarity)
+**Approach:** Telegram `/performance` command that shows:
+- Total deployed (SOL/USD)
+- Total fees earned (SOL/USD)
+- Net PnL per period (24h, 7d, 30d, all-time)
+- Win rate per close reason
+- Best/worst performing pools
+- ROI percentage
+
+#### S2: Experimental as Default Migration
+**Effort:** Small (after R8 verified stable for 1 week)
+**Impact:** Medium (cleaner default behavior)
+**Approach:** If R8 metrics show clear win, change config.js default from
+`"pecut"` to `"experimental"`. Update docs.
+
+#### S3: HiveMind Lessons Integration Deeper
+**Effort:** Medium-Large
+**Impact:** Medium-High (currently underutilized data)
+**Approach:** Beyond just storage, use lessons in screening or close decisions.
+E.g., pool that lost money 3x in last week → auto-cooldown longer.
+
+### Tier 4: Maintenance & Health
+
+#### M1: Test Infrastructure
+**Effort:** Medium
+**Impact:** Medium (regression safety)
+**Approach:** Expand `test/pool-cooldown-test.js` pattern to other modules.
+Add inline-predicate tests to a runnable suite (`npm test`).
+
+#### M2: Upstream Sync Cadence
+**Effort:** Small (recurring)
+**Impact:** Low-Medium
+**Approach:** Establish weekly check `git fetch upstream && git log
+experimental..upstream/experimental`. Decide cherry-pick vs merge per
+upstream commit batch.
+
+#### M3: Log Rotation & Archival
+**Effort:** Small
+**Impact:** Low
+**Approach:** Logs accumulate. Add weekly rotation/compress old daily logs to
+prevent disk fill.
+
+#### M4: Bot Restart Drills
+**Effort:** Tiny
+**Impact:** Medium (operational confidence)
+**Approach:** Periodically test bot restart from cold start. Verify state.json
+loads correctly. Verify pending positions resume tracking.
+
+### Out of Scope / Decided Against
+
+- **R3 LLM-eval SL** — likely net-negative due to latency at SL moment
+- **PVP Rivalry check at close** — was R8's "experimental" twin in original spec
+  but R8 indicators cover similar ground; PVP rivalry may be redundant
+- **Aggressive trailing TP tuning** — current 3s pecut / 15s main works; don't
+  fix what isn't broken
+
+---
+
+## 📅 SESSION CONTINUITY LOG
+
+Future sessions should add brief entries here when major milestones land.
+Format: `**YYYY-MM-DD** — Brief description (commit hash)`
+
+- **2026-05-07** — R4.1 implemented and verified (commit pre-merge)
+- **2026-05-08** — Cooldown investigation, tuning applied
+- **2026-05-09** — Fork created, security hardening
+- **2026-05-10** — Merge with upstream complete (commit 56c04ee)
+- **2026-05-12** — R8 implemented (commit b022962)
+- **2026-05-13** — API monitoring + relay enrichment merge (commit 2837752)
+- **2026-05-XX** — R8 production verification activated (Phase H)
+- **2026-05-XX** — R8 verdict & next priority decision
+
+---
+
+## 🎯 PHASE H: R8 VERIFICATION & EXPERIMENTAL PROFILE ACTIVATION
+
+**Status:** PENDING — Next priority
+**Date added:** 2026-05-13
+**Goal:** Verify R8 (indicator-aware OOR close) in production by activating
+`closeProfile=experimental` with small capital exposure.
+
+### Why This Phase Exists
+
+R8 was implemented and tested via inline-predicate tests (T1-T10 all pass),
+but inline tests cannot verify:
+- Real indicator API latency under load
+- Async pre-fetch race conditions with state mutations
+- Indicator fail-open behavior with real API failures
+- Integration with R7 Safety-Lock gate ordering
+- Whether `supertrend_break` exit preset gives sensible hold/close decisions on real market data
+
+Production verification is required before considering experimental profile stable.
+
+### Pre-flight Checklist
+
+Run before flipping profile:
+
+- [ ] Backup `state.json` to `state.json.backup-pre-r8-activation-YYYYMMDD-HHMMSS`
+- [ ] Confirm `closeProfile` currently = `pecut` via `/observe` or `/settings`
+- [ ] Set `deployAmountSol` ≤ 0.25 (small exposure)
+- [ ] Set `maxPositions` ≤ 3 (limit blast radius)
+- [ ] Confirm `r8IndicatorCheck = true` in config
+- [ ] Confirm `r8ExitPreset = "supertrend_break"` (default)
+- [ ] Confirm `r8OorCooldownHours = 6`
+- [ ] Confirm 0 active positions OR all active positions can be closed naturally first
+- [ ] Available 4-6 hours after flip for monitoring
+- [ ] Market relatively calm (avoid flip during major volatility spike)
+
+### Activation Steps
+
+/settings → flip closeProfile from pecut → experimental
+Verify settings summary: "profile: experimental"
+Note flip timestamp for /observe compare boundary detection
+Set timer for first check at +1 hour, +4 hours, +12 hours, +24 hours
+
+
+### Monitoring Routine
+
+#### First 4 Hours (Intensive)
+
+Every 60-90 minutes, run via Telegram:
+/observe
+/observe held
+/status apis
+
+What to watch:
+- ✅ Errors counter stays 0 (or only known non-related errors)
+- ✅ R8-Hold counter > 0 (indicates R8 gate triggered at least once)
+- ✅ Positions deploy successfully (R8 doesn't block entry)
+- ⚠️  R8-Hold positions with extended duration (>2 hours) — investigate
+- 🔴 Any indicator API errors in logs
+
+Log greps:
+```bash
+# R8 activations today
+grep "R8-Hold:" logs/agent-$(date +%Y-%m-%d).log
+
+# Indicator API failures
+grep -E "indicator.*error|chart-indicators.*error|confirmIndicatorPreset.*error" logs/agent-$(date +%Y-%m-%d).log
+
+# R8 fail-open events (API down, close as normal)
+grep -E "R8.*fail-open|indicator.*unavailable" logs/agent-$(date +%Y-%m-%d).log
+```
+
+#### 4-24 Hours (Standard Monitoring)
+
+Every 4-6 hours:
+- `/observe compare` — baseline (pecut last 2-3 days) vs current (experimental)
+- `/observe reasons` — distribution shift?
+- `/observe held` — track R8-Hold positions
+
+Expectations:
+- R8-Hold count may be low (only fires when OOR + indicators say "hold")
+- Total closes/day may be lower than pecut (R8 holds some that would have closed)
+- PnL distribution may shift toward fewer but better closes (or worse if indicators wrong)
+
+#### 24-48 Hours (Verdict)
+
+Decision matrix:
+
+| Pattern | Verdict | Action |
+|---------|---------|--------|
+| R8-Hold fires 2-10x/day, captured held → recovery, PnL net better/same vs pecut | 🟢 KEEP | Continue experimental, consider scale up |
+| R8-Hold fires but positions still close at loss (indicators wrong) | 🟡 TUNE | Try different `r8ExitPreset` (rsi_reversal, bollinger_reversion, etc.) |
+| R8-Hold rarely fires (<1/day) | 🟡 NEUTRAL | Indicators rarely confirm hold — R8 marginal benefit, consider revert |
+| Errors elevated, positions stuck, PnL clearly worse | 🔴 REVERT | Flip back to pecut, investigate logs, fix before re-attempt |
+
+### Red Flag Triggers (Immediate Revert)
+
+Flip back to `pecut` if any of these occur:
+
+1. **R8-Hold positions stuck unprofitable** with PnL falling -5% to -10% while held
+2. **Indicator API errors >10/hour** — fail-open works, but suggests API issues
+3. **Position deploy stops** — investigate immediately
+4. **Bot crash or memory leak** post-flip
+5. **R8 gate logic bug** evident from logs (e.g., R8 firing for non-experimental profile)
+
+Revert via Telegram:
+/settings → flip closeProfile experimental → pecut
+
+Bot processes existing experimental-profile positions through whatever close rule fires
+(R7 Safety-Lock still active, R8 simply stops being evaluated).
+
+### R8 Tuning Parameters
+
+If R8 works but suboptimal, tunable parameters:
+
+| Param | Default | Options to try |
+|-------|---------|----------------|
+| `r8ExitPreset` | `supertrend_break` | `rsi_reversal`, `bollinger_reversion`, `rsi_plus_supertrend`, `supertrend_or_rsi`, `bb_plus_rsi`, `fibo_reclaim`, `fibo_reject` |
+| `r8OorCooldownHours` | 6 | 2-12h depending on hold pattern |
+| `r8IndicatorCheck` | true | false to disable R8 entirely (experimental → behaves like pecut for OOR) |
+
+### Success Metric
+
+R8 verification SUCCESS = 48 hours of `closeProfile=experimental` with:
+- 0 critical errors
+- R8-Hold mechanism fires at least 5 times
+- At least 50% of R8-Hold positions either:
+  - Recover to profit before closing, OR
+  - Close at smaller loss than they would have at OOR-only timeout
+- PnL net (experimental period) ≥ PnL net (pecut baseline, same duration)
+
+After success: consider scale up `deployAmountSol`, continue monitoring 1 week,
+then evaluate making experimental the default profile.
+
+After failure or yellow verdict: document findings, tune `r8ExitPreset` or
+parameters, re-test.
+
+---
+
+## 🗺️ ROADMAP AFTER R8 VERIFICATION
+
+Priority order based on impact × effort × stability:
+
+### Tier 1: Critical Fixes (After R8 Verified)
+
+#### F1: Darwinian Signal Wiring (KNOWN ISSUE)
+**Effort:** Medium (~30-60 lines)
+**Impact:** High (currently 0 — feedback loop broken)
+**Approach:** Wire `getAndClearStagedSignals()` into `tools/dlmm.js` deploy flow.
+Pass `signal_snapshot` through `trackPosition()` → `recordPerformance()` →
+weight evolution. See `docs/DARWINIAN_SIGNALS.md` for full spec.
+
+#### F2: Encryption Key Placeholder (SECURITY)
+**Effort:** Small (~15 minutes)
+**Impact:** High (currently keys partially exposed in plaintext)
+**Approach:** Generate proper encryption key for `.envrypt`, re-encrypt secrets in
+`.env`. Verify decryption works. Delete `.env.raw` if exists.
+
+### Tier 2: Remaining R-Implementations
+
+#### R6: HiveMind Close Decision Sync (ORIGINAL SPEC)
+**Effort:** Large (~150 lines + async coordination)
+**Impact:** Medium (HiveMind currently only stores lessons, not consulted at close)
+**Risk:** High (async network call in hot close path, race conditions, HiveMind
+downtime fallback needed)
+**Prerequisites:**
+- R8 stable for 1+ week
+- HiveMind server uptime/SLA understood
+- Failure mode design (HiveMind down → fail-open like R8? Or fail-closed?)
+
+#### R3: LLM-eval SL Path (ORIGINAL SPEC)
+**Effort:** Medium (~80 lines)
+**Impact:** Low-Medium (current hard SL works well; LLM eval adds nuance but slows)
+**Risk:** Medium (LLM latency at stop-loss moment when speed matters most)
+**Recommendation:** Reconsider necessity. Current Hard Floor SL is fast and works.
+LLM-eval might delay critical exit. May be optional rather than priority.
+
+### Tier 3: Strategic Improvements
+
+#### S1: Aggregate Performance Dashboard
+**Effort:** Medium (~100 lines)
+**Impact:** High (decision making clarity)
+**Approach:** Telegram `/performance` command that shows:
+- Total deployed (SOL/USD)
+- Total fees earned (SOL/USD)
+- Net PnL per period (24h, 7d, 30d, all-time)
+- Win rate per close reason
+- Best/worst performing pools
+- ROI percentage
+
+#### S2: Experimental as Default Migration
+**Effort:** Small (after R8 verified stable for 1 week)
+**Impact:** Medium (cleaner default behavior)
+**Approach:** If R8 metrics show clear win, change config.js default from
+`"pecut"` to `"experimental"`. Update docs.
+
+#### S3: HiveMind Lessons Integration Deeper
+**Effort:** Medium-Large
+**Impact:** Medium-High (currently underutilized data)
+**Approach:** Beyond just storage, use lessons in screening or close decisions.
+E.g., pool that lost money 3x in last week → auto-cooldown longer.
+
+### Tier 4: Maintenance & Health
+
+#### M1: Test Infrastructure
+**Effort:** Medium
+**Impact:** Medium (regression safety)
+**Approach:** Expand `test/pool-cooldown-test.js` pattern to other modules.
+Add inline-predicate tests to a runnable suite (`npm test`).
+
+#### M2: Upstream Sync Cadence
+**Effort:** Small (recurring)
+**Impact:** Low-Medium
+**Approach:** Establish weekly check `git fetch upstream && git log
+experimental..upstream/experimental`. Decide cherry-pick vs merge per
+upstream commit batch.
+
+#### M3: Log Rotation & Archival
+**Effort:** Small
+**Impact:** Low
+**Approach:** Logs accumulate. Add weekly rotation/compress old daily logs to
+prevent disk fill.
+
+#### M4: Bot Restart Drills
+**Effort:** Tiny
+**Impact:** Medium (operational confidence)
+**Approach:** Periodically test bot restart from cold start. Verify state.json
+loads correctly. Verify pending positions resume tracking.
+
+### Out of Scope / Decided Against
+
+- **R3 LLM-eval SL** — likely net-negative due to latency at SL moment
+- **PVP Rivalry check at close** — was R8's "experimental" twin in original spec
+  but R8 indicators cover similar ground; PVP rivalry may be redundant
+- **Aggressive trailing TP tuning** — current 3s pecut / 15s main works; don't
+  fix what isn't broken
+
+---
+
+## 📅 SESSION CONTINUITY LOG
+
+Future sessions should add brief entries here when major milestones land.
+Format: `**YYYY-MM-DD** — Brief description (commit hash)`
+
+- **2026-05-07** — R4.1 implemented and verified (commit pre-merge)
+- **2026-05-08** — Cooldown investigation, tuning applied
+- **2026-05-09** — Fork created, security hardening
+- **2026-05-10** — Merge with upstream complete (commit 56c04ee)
+- **2026-05-12** — R8 implemented (commit b022962)
+- **2026-05-13** — API monitoring + relay enrichment merge (commit 2837752)
+- **2026-05-XX** — R8 production verification activated (Phase H)
+- **2026-05-XX** — R8 verdict & next priority decision
