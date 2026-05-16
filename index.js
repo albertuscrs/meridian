@@ -230,8 +230,15 @@ export async function runManagementCycle({ silent = false } = {}) {
 
   // Skip RPC round-trip if state shows no open positions
   if (getTrackedPositions(true).length === 0) {
-    log("cron", "No open positions (state) — skipping management, triggering screening");
-    runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+    const screenCooldownMs = config.schedule.screeningIntervalMin * 60 * 1000;
+    const sinceLastScreen = timers.screeningLastRun ? Date.now() - timers.screeningLastRun : Infinity;
+    if (sinceLastScreen >= screenCooldownMs) {
+      log("cron", "No open positions (state) — skipping management, triggering screening");
+      runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+    } else {
+      const remainingMin = Math.ceil((screenCooldownMs - sinceLastScreen) / 60000);
+      log("cron", `No open positions (state) — skipping management, screening cooldown (${remainingMin}m left)`);
+    }
     return "No open positions. Triggering screening cycle.";
   }
 
@@ -251,9 +258,17 @@ export async function runManagementCycle({ silent = false } = {}) {
     positions = livePositions?.positions || [];
 
     if (positions.length === 0) {
-      log("cron", "No open positions — triggering screening cycle");
-      mgmtReport = "No open positions. Triggering screening cycle.";
-      runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+      const screenCooldownMs = config.schedule.screeningIntervalMin * 60 * 1000;
+      const sinceLastScreen = timers.screeningLastRun ? Date.now() - timers.screeningLastRun : Infinity;
+      if (sinceLastScreen >= screenCooldownMs) {
+        log("cron", "No open positions — triggering screening cycle");
+        mgmtReport = "No open positions. Triggering screening cycle.";
+        runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+      } else {
+        const remainingMin = Math.ceil((screenCooldownMs - sinceLastScreen) / 60000);
+        log("cron", `No open positions — screening cooldown (${remainingMin}m left)`);
+        mgmtReport = `No open positions. Screening cooldown (${remainingMin}m left).`;
+      }
       return mgmtReport;
     }
 

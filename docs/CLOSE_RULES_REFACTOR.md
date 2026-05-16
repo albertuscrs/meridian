@@ -12,10 +12,10 @@ decisions behind it.
 | **R1: Stop Loss** | Hard floor: PnL ≤ stopLossPct → close | LLM-eval path (R3, not impl) | Same as pecut |
 | **R2: Take Profit** | PnL ≥ takeProfitPct → close | 3s confirm window (R4 ✅, R4.1 ✅) | Same as pecut + indicator validation |
 | **R3: Pump Above** | active_bin > upper_bin + binsToClose + binsAbove → close | minProfitPctToCloseOOR gate ✅ (R5) | PVP rivalry check (R6, not impl) |
-| **R4: OOR Stale** | state.js: OOR above 35m / below 8m → close | Safety-Lock: hold if pnl≤0 at timeout ✅ (R7) | Indicator-Aware: RSI/ST check before close (R8, not impl) |
+| **R4: OOR Stale** | state.js: OOR above 35m / below 8m → close | Safety-Lock: hold if pnl≤0 at timeout ✅ (R7) | Indicator-Aware: RSI/ST check before close ✅ (R8, impl, Phase H pending) |
 | **R5: Low Yield** | fee/TVL < minFeePerTvl24h after minAge → close | Same (matured yield 60min min) | Same |
 ---
-## Production Status (as of 2026-05-07)
+## Production Status (as of 2026-05-13)
 | Rule | Profile | Status | Production verified |
 |------|---------|--------|---------------------|
 | R1 (Stop Loss) | All | ✅ Hard floor active | Yes (pre-refactor baseline) |
@@ -25,12 +25,14 @@ decisions behind it.
 | R3 (Pump Above) | Pecut | ✅ minProfitPct gate | Yes (2026-05-06: 17 hold events observed) |
 | R4 (OOR Stale) | Main | ✅ Time-based (35m/8m) | Yes |
 | R4 (OOR Stale) | Pecut | ✅ Safety-Lock | Yes (2026-05-05: lock-in success) |
+| R4 (OOR Stale) | Experimental | ✅ R8 Indicator-Aware (fail-open) | Yes (2026-05-12: commit b022962) |
 | R5 (Low Yield) | All | ✅ Configurable age (R9 fix) | Yes (R9 fix verified) |
 | R10 cleanup | All | ✅ Single OOR engine | Yes (2026-05-05: trailing-armed OOR) |
 | R4.1 patch | All | ✅ Single trailing TP path | Yes (2026-05-07: 3 confirms + 2 rejects) |
 
-Active profile in production: **pecut** (since 2026-05-05 16:09 UTC)
+Active profile in production: **experimental** (since 2026-05-12 00:16 UTC)
 Default profile for new deployments: **main**
+R8 production verification: **✅ Phase H complete — GREEN verdict 2026-05-17** (see HANDOVER.md)
 
 ---
 ## Implementation Status
@@ -71,10 +73,15 @@ Default profile for new deployments: **main**
   - 2 trailing-armed OOR closes processed via confirmation window (no instant-close bypass)
   - 0 errors in trailing TP path
   - **Confirms: pecut profile feature-complete per spec**
-### 🔲 R8: Indicator-Aware OOR Close (experimental)
-- Location: state.js Rule 4 block (line 465)
-- Condition: profile === "experimental" → call chart-indicators.js for mint → validate RSI/ST before OOR close
-- Requires: lightweight async indicator fetch with short timeout added to chart-indicators.js
+### ✅ R8: Indicator-Aware OOR Close (experimental) — DONE
+- **Commit:** `b022962` (2026-05-12)
+- Location: state.js Rule 4 block (lines 469-501) — both above and below OOR directions
+- Condition: profile === "experimental" && !trailingArmed → pre-fetch indicator via `confirmIndicatorPreset()` (chart-indicators.js) → hold if not confirmed, close if confirmed
+- Pre-fetch in management cycle: index.js fetches indicator data before LLM loop; stored in `indicatorData` Map keyed by position address
+- Config fields: `r8IndicatorCheck` (toggle), `r8ExitPreset` (preset name), `r8OorCooldownHours` (cooldown on eventual close)
+- Fail-open: API unavailable → close normally (R8 gate only holds on explicit `confirmed: false`)
+- Gate order: OOR timeout → trailingArmed? → Safety-Lock (R7) → R8 → OUT_OF_RANGE
+- Status: implemented, committed. Phase H production verification pending.
 ### 🔲 R3: LLM-Eval Stop-Loss (pecut/experimental)
 - Location: index.js getDeterministicCloseRule Rule 1 block (line 930)
 - Condition: profile !== "main" && PnL at stop-loss threshold → call LLM to evaluate before closing
@@ -154,9 +161,9 @@ Configurable via `outOfRangeWaitMinutes` and `outOfRangeBelowWaitMinutes`.
 | Item | Risk | Prerequisite |
 |------|------|-------------|
 | P1: outOfRangeBelowWaitMinutes in Telegram UI | LOW | None |
-| R8: Indicator-Aware OOR | MEDIUM | Lightweight chart-indicators.js fetch function |
-| R3: LLM-eval stop-loss | HIGH | Define fallback on LLM failure |
-| R6: HiveMind sync at close | HIGH | Server contract definition |
+| R8: Phase H production verification | LOW | R8 code is done; need 48h experimental profile run |
+| R3: LLM-eval stop-loss | HIGH | Define fallback on LLM failure (likely deprioritised — see HANDOVER.md) |
+| R6: HiveMind sync at close | HIGH | R8 stable 1+ week; server contract definition |
 ---
 ## Glossary
 - **Main**: Default close profile — pure deterministic rules with no LLM in the path

@@ -207,7 +207,7 @@ const actualBaseFee = baseFactor > 0
 - `getLessonsForPrompt({ agentType })` — injects relevant lessons into system prompt
 - `evolveThresholds()` — adjusts screening thresholds based on winners vs losers
 - Performance recorded via `recordPerformance()` called from executor.js after `close_position`
-- **Known issue**: `evolveThresholds()` references `maxVolatility` and `minFeeTvlRatio` but config.js uses `minFeeActiveTvlRatio` and has no `maxVolatility` key — the evolution of these keys is a no-op
+- `evolveThresholds()` adjusts both `maxVolatility` (`config.screening.maxVolatility`) and `minFeeActiveTvlRatio` (`config.screening.minFeeActiveTvlRatio`) — both keys are correct and evolution is functional
 
 ---
 
@@ -277,5 +277,5 @@ Not required for normal operation.
 
 ## Known Issues / Tech Debt
 
-- `lessons.js evolveThresholds()` evolves `maxVolatility` (works — `config.screening.maxVolatility` exists) and `minFeeTvlRatio` (wrong key — config uses `minFeeActiveTvlRatio`, so this evolution is a no-op). Also update `lessons.js` line 354 to reference `config.screening.minFeeActiveTvlRatio` to fix the fee/TVL evolution.
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
+- Darwinian signal weighting feedback loop is broken: `getAndClearStagedSignals()` (signal-tracker.js) is never called from `tools/dlmm.js` deploy flow, so `signal_snapshot` is always `null` in state.json and lessons.json. Weights remain at defaults (1.0) and are never recalculated. Fix: import and call `getAndClearStagedSignals(pool_address)` at both `trackPosition()` call sites in dlmm.js, pass result as `signal_snapshot`.
