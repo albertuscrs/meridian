@@ -275,7 +275,54 @@ Not required for normal operation.
 
 ---
 
+## Close Profile System
+
+Three behavioral profiles for close rules, set via `config.management.closeProfile`:
+
+| Profile | R4 OOR | R7 Safety-Lock | R8 Indicator |
+|---------|--------|----------------|--------------|
+| `main` | Time-based (35m above / 8m below) | No | No |
+| `pecut` | Time-based + Safety-Lock | Yes | No |
+| `experimental` | Time-based + Safety-Lock + R8 | Yes | Yes |
+
+**Active in production:** `experimental` (since 2026-05-12)
+
+**R7 Safety-Lock** (`pecut` + `experimental`): if OOR timeout reached but `pnl_pct ≤ 0`, hold instead of close. Log marker: `[STATE] Safety-Lock:`
+
+**R8 Indicator-Aware OOR** (`experimental` only): pre-fetches chart indicators before closing OOR positions. If `confirmIndicatorPreset()` returns `confirmed: false`, hold. Fail-open: API unavailable → close normally (never blocks on error).
+- Config: `r8IndicatorCheck` (toggle), `r8ExitPreset` (preset name), `r8OorCooldownHours`
+- Gate order: OOR timeout → trailingArmed? → R7 Safety-Lock → R8 → OUT_OF_RANGE
+
+**R4.1 Trailing TP** (all profiles): state.js Rule 2 always returns `{ action: "TRAILING_TP_QUEUED" }` — callers schedule timer-based confirmation (3s pecut / 15s main+experimental). Never instant-close.
+
+---
+
+## Darwinian Signal Wiring (F1 — FIXED 2026-05-17)
+
+`getAndClearStagedSignals()` (signal-tracker.js) is now called from `tools/dlmm.js` at both `trackPosition()` call sites. Signal snapshots are stored in state.json + lessons.json and feed the Darwinian weight evolution loop.
+
+`signal-tracker.js` supports dual-index lookup: by `poolAddress` (primary) or `baseMint` (fallback, for cases where deploy pool address differs from screened pool).
+
+---
+
+## Regression Tests
+
+`test/regression-test.js` — 35 inline unit tests covering all custom R-implementations.
+Run: `node test/regression-test.js`
+
+| Test group | Cases | What it covers |
+|------------|-------|----------------|
+| R1 Stop Loss | 4 | threshold boundary, suspicious pnl bypass |
+| R2/R4.1 Trailing TP | 4 | always queued, not instant-close |
+| R7 Safety-Lock | 7 | pecut+experimental, above+below, pnl=0 edge, main no-lock |
+| R8 Indicator-Aware | 6 | hold/close/fail-open/profile guard/trailing bypass |
+| R5 Low Yield | 4 | age gate, custom minAgeBeforeYieldCheck |
+| F1 signal-tracker | 7 | pool lookup, base_mint fallback, clear-after-retrieval |
+
+Also: `test/pool-cooldown-test.js` (6 cooldown scenarios), `test/test-solmode-pnl.js` (SOL mode PnL).
+
+---
+
 ## Known Issues / Tech Debt
 
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
-- Darwinian signal weighting feedback loop is broken: `getAndClearStagedSignals()` (signal-tracker.js) is never called from `tools/dlmm.js` deploy flow, so `signal_snapshot` is always `null` in state.json and lessons.json. Weights remain at defaults (1.0) and are never recalculated. Fix: import and call `getAndClearStagedSignals(pool_address)` at both `trackPosition()` call sites in dlmm.js, pass result as `signal_snapshot`.

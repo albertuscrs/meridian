@@ -144,13 +144,42 @@ Telegram notification on exhaustion: `notifySwapFailure()` in `telegram.js`.
 - `getScreeningClient()` — Xiaomi endpoint for screening
 - `getFallbackClient()` — OpenRouter for fallback
 
-### 8. Darwinian Signal Weighting (DOCUMENTED)
+### 8. Darwinian Signal Weighting (FIXED — 2026-05-17)
 
 **Doc:** `docs/DARWINIAN_SIGNALS.md`
 
-**Known issue:** Feedback loop is broken. `signal_snapshot` is never populated on positions. `getAndClearStagedSignals()` is defined but never called. All weights stuck at 1.0 (defaults).
+**Fixed via upstream merge `7642e2c`:** `getAndClearStagedSignals()` now called at both `trackPosition()` call sites in `tools/dlmm.js`. `signal_snapshot` is now populated on every position. Also: `signal-tracker.js` gained base_mint fallback index; `signal-weights.js` gained `getEntrySignalSnapshot()` for backward compat with old entries; `lessons.js` gained `buildSignalSnapshot()` helper.
 
-**Fix needed:** Wire `getAndClearStagedSignals()` into `dlmm.js` deploy flow.
+### 9. Upstream Merge — SOL PnL + Darwin Signals (DONE — 2026-05-17)
+
+**Commit:** `8b472c1` (merge of upstream `7642e2c`)
+
+**Changes from upstream:**
+- `tools/dlmm.js`: `getPositionPnl()` and `closePosition()` now respect `solMode` config — PnL reported in SOL when `solMode: true`. Uses `getClosedPnlValue()` / `getClosedPnlPct()` helpers.
+- `tools/dlmm.js`: `getMyPositions()` accepts optional `wallet_address` param for checking arbitrary wallets.
+- `signal-tracker.js`: dual-index by pool address + base_mint, TTL-based cleanup.
+- `signal-weights.js`: `getEntrySignalSnapshot()` reads signal fields from both `signal_snapshot` field and flat entry fields (backward compat).
+- `lessons.js`: `buildSignalSnapshot()` merges staged + tracked signals.
+- `index.js`: `getTrackedPositions` import, `base_mint` added to `stageSignals` call, early-return pnl poll when no positions.
+
+**Conflict resolution:** Kept our `pnlSol`/`pnlSolPct` explicit vars alongside upstream helpers; kept extra return fields (`pnl_sol`, `fees_sol`, `minutes_held`); restored `queueTrailingDropConfirmation` import lost from our branch.
+
+### 10. Regression Test Suite (DONE — 2026-05-17)
+
+**Commit:** `03979b0`
+**File:** `test/regression-test.js`
+**Run:** `node test/regression-test.js`
+
+35 inline unit tests covering all custom R-implementations (no file I/O, fast):
+
+| Group | Cases | Coverage |
+|-------|-------|----------|
+| R1 Stop Loss | 4 | threshold, suspicious bypass, exact boundary |
+| R2/R4.1 Trailing TP | 4 | always TRAILING_TP_QUEUED, drop threshold, OOR order |
+| R7 Safety-Lock | 7 | pecut+experimental, above+below, pnl=0, main no-lock |
+| R8 Indicator-Aware | 6 | hold, close, fail-open, profile guard, trailing bypass |
+| R5 Low Yield | 4 | age gate, custom minAge, fee above min |
+| F1 signal-tracker | 7 | pool lookup, base_mint fallback, clear-after-retrieval, null safety |
 
 ---
 
@@ -158,9 +187,9 @@ Telegram notification on exhaustion: `notifySwapFailure()` in `telegram.js`.
 
 ```json
 {
-  "closeProfile": "pecut",
+  "closeProfile": "experimental",
   "deployAmountSol": 0.25,
-  "maxPositions": 3,
+  "maxPositions": 2,
   "r8IndicatorCheck": true,
   "r8ExitPreset": "supertrend_break",
   "r8OorCooldownHours": 6,
@@ -465,12 +494,9 @@ Priority order based on impact × effort × stability:
 
 ### Tier 1: Critical Fixes (After R8 Verified)
 
-#### F1: Darwinian Signal Wiring (KNOWN ISSUE)
-**Effort:** Medium (~30-60 lines)
-**Impact:** High (currently 0 — feedback loop broken)
-**Approach:** Wire `getAndClearStagedSignals()` into `tools/dlmm.js` deploy flow.
-Pass `signal_snapshot` through `trackPosition()` → `recordPerformance()` →
-weight evolution. See `docs/DARWINIAN_SIGNALS.md` for full spec.
+#### ✅ F1: Darwinian Signal Wiring (DONE — 2026-05-17)
+**Resolved via:** upstream merge `7642e2c`
+Upstream independently fixed this: `getAndClearStagedSignals()` now called at both `trackPosition()` call sites in `tools/dlmm.js`. Signal snapshots stored in state.json + lessons.json. `signal-tracker.js` also gained base_mint fallback index. Darwinian weight evolution is now fully wired.
 
 #### F2: Encryption Key Placeholder (SECURITY)
 **Effort:** Small (~15 minutes)
@@ -524,11 +550,9 @@ E.g., pool that lost money 3x in last week → auto-cooldown longer.
 
 ### Tier 4: Maintenance & Health
 
-#### M1: Test Infrastructure
-**Effort:** Medium
-**Impact:** Medium (regression safety)
-**Approach:** Expand `test/pool-cooldown-test.js` pattern to other modules.
-Add inline-predicate tests to a runnable suite (`npm test`).
+#### ✅ M1: Test Infrastructure (DONE — 2026-05-17)
+`test/regression-test.js` added — 35 cases covering R1/R2/R4.1/R5/R7/R8/F1 signal-tracker.
+Run: `node test/regression-test.js`. Existing: `pool-cooldown-test.js` (6), `test-solmode-pnl.js` (10).
 
 #### M2: Upstream Sync Cadence
 **Effort:** Small (recurring)
@@ -572,6 +596,7 @@ Format: `**YYYY-MM-DD** — Brief description (commit hash)`
 - **2026-05-13** — API monitoring + relay enrichment merge (commit 2837752); Phase H activated (closeProfile → experimental)
 - **2026-05-15** — Phase H monitoring: R8 pre-fetch ✅ (54x May 14), R8 holds 4x (May 13), Safety-Lock 20x (May 14), 0 errors
 - **2026-05-17** — Phase H verdict: 🟢 GREEN — 3 unique R8-held positions (11 events May 12-16), 0 close at loss, mechanism confirmed working. Next: F1 Darwinian signal wiring.
+- **2026-05-17** — Upstream merge `7642e2c` (sol pnl + darwin signal fix); F1 resolved via merge; regression test suite added (35 cases, commits 8b472c1 + 03979b0)
 
 ---
 
