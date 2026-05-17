@@ -951,6 +951,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         if (exit) {
+          if (exit.action === "EMERGENCY_CLOSE") {
+            _pollTriggeredAt = 0; // bypass cooldown — close immediately
+            log("state", `[PnL poll] Emergency close: ${p.pair} — ${exit.reason}`);
+            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Emergency management failed: ${e.message}`));
+            continue;
+          }
           if (exit.action === "TRAILING_TP_QUEUED") {
             scheduleTrailingDropConfirmation(p.position);
             continue;
@@ -1300,6 +1306,7 @@ function settingValue(key) {
     maxFeeActiveTvlRatio: config.screening.maxFeeActiveTvlRatio,
     takeProfitPct: config.management.takeProfitPct,
     stopLossPct: config.management.stopLossPct,
+    emergencyClosePct: config.management.emergencyClosePct,
     trailingTriggerPct: config.management.trailingTriggerPct,
     trailingDropPct: config.management.trailingDropPct,
     repeatDeployCooldownEnabled: config.management.repeatDeployCooldownEnabled,
@@ -1392,6 +1399,7 @@ function renderSettingsMenu(page = "main") {
       inputButton("maxDeployAmount", "Max SOL"),
       inputButton("takeProfitPct", "TP %"),
       inputButton("stopLossPct", "SL %"),
+      inputButton("emergencyClosePct", "Emergency close %", { digits: 0 }),
       inputButton("minProfitPctToCloseOOR", "Min profit % to close on pump", { digits: 2 }),
       [toggleButton("trailingTakeProfit", "Trailing TP")],
       inputButton("trailingTriggerPct", "Trail trigger", { digits: 1 }),

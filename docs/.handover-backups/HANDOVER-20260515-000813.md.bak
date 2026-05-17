@@ -1,0 +1,318 @@
+# Meridian DLMM Agent — Handover Document
+**Date:** 2026-05-13
+**Branch:** experimental
+**Status:** Stable — all merges complete, bot running
+
+---
+
+## 🚨 CRITICAL CONTEXT — READ THIS FIRST
+
+This is a **personal fork** of an open-source DLMM LP agent (Meridian).
+
+- **My fork (origin):** https://github.com/albertuscrs/meridian
+- **Upstream owner:** https://github.com/yunus-0x/meridian
+- **Current HEAD:** `2837752` (merge: integrate upstream relay enrichment refactor)
+- **Bot status:** Running stable, profile=pecut, model=mimo-v2.5 (screening), MiniMax-M2.7 (management)
+
+### Git History (Recent)
+
+```
+2837752 merge: integrate upstream relay enrichment refactor
+016f239 Move relay position enrichment into bot (upstream)
+b022962 feat: R8 indicator-aware OOR close for experimental profile
+01d442d fix: add agentId to relay health check
+4b964df fix: add hard timeout for relay position fetch
+48ade49 fix: increase relay timeout for position fetch
+37be09e fix: correct GMGN API check endpoint
+397fc80 fix: correct relay health check endpoint
+4e5d741 fix: escape HTML in API status messages for Telegram
+fab18e3 feat: add /status to Telegram bot command menu
+528d79b feat: add API monitoring and /status subcommands
+416d226 fix: add launchpad filtering to GMGN screening pipeline
+56c04ee merge: integrate upstream/experimental + preserve R-implementations
+```
+
+---
+
+## ✅ COMPLETED WORK
+
+### 1. Merge with Upstream (DONE)
+
+Successfully merged owner's 11+ commits while preserving all R-implementations:
+- PM2 process management (4 commits)
+- Volatility precision enhancements (3 commits)
+- Discord signals as launchpad source
+- DLMM deploy guard
+- Pre-deploy screening enforcement
+- Relay enrichment refactor (commit 016f239)
+
+All 7 conflict files resolved. Auto-merged files audited for silent R-logic loss.
+
+### 2. R8: Indicator-Aware OOR Close (DONE)
+
+**Commit:** `b022962`
+
+R8 validates chart indicators before closing OOR positions in "experimental" profile. If indicators don't confirm the exit, the position is held longer.
+
+**Files modified:**
+- `config.js` — 3 new fields: `r8IndicatorCheck`, `r8ExitPreset`, `r8OorCooldownHours`
+- `state.js` — R8 gate in Rule 4 (both above/below), `indicatorData` parameter
+- `index.js` — Pre-fetch indicators, /settings UI, /observe R8 parsing
+- `pool-cooldown.js` — `CLOSE_REASON_R8_HELD`, `r8OorCooldownHours` cooldown
+- `tools/executor.js` — CONFIG_MAP for R8 keys
+- `tools/definitions.js` — update_config description
+
+**Config fields:**
+
+| Field | Default | /settings | CONFIG_MAP |
+|-------|---------|-----------|------------|
+| `r8IndicatorCheck` | `true` | ✅ toggle | ✅ |
+| `r8ExitPreset` | `"supertrend_break"` | ✅ 4 preset buttons | ✅ |
+| `r8OorCooldownHours` | `6` | ✅ input | ✅ |
+
+**Gate order (experimental):**
+```
+OOR timeout
+  → trailingArmed? → close immediately
+  → Safety-Lock (R7): pnlPct ≤ 0? → hold
+  → R8: r8ExitPreset confirmed? → hold if not
+  → OUT_OF_RANGE → close
+```
+
+**Fail-open:** API unavailable → close as normal. Only active for `experimental` profile.
+
+### 3. API Monitoring System (DONE)
+
+**Commits:** `528d79b`, `fab18e3`, `4e5d741`, `397fc80`, `01d442d`
+
+**New file:** `tools/api-monitor.js` — checks status of all external APIs.
+
+**Telegram commands:**
+```
+/status apis     — check all API status
+/status relay    — check Agent Meridian relay
+/status hivemind — check HiveMind server
+/status gmgn     — check GMGN API
+/status jupiter  — check Jupiter swap API
+/status meteora  — check Meteora DLMM API
+/status rpc      — check Solana RPC
+```
+
+Each shows: ✅/❌ status, HTTP code, latency, error details.
+
+### 4. GMGN Launchpad Filtering (DONE)
+
+**Commit:** `416d226`
+
+GMGN screening pipeline was missing `blockedLaunchpads` filter. Added to Stage 2 (token info filter).
+
+- `meteora_virtual_curve` added to `allowedLaunchpads` in `user-config.json`
+- `letsbonk.fun` in `blockedLaunchpads` now correctly filtered
+
+### 5. Relay Hard Timeout (DONE)
+
+**Commits:** `4b964df`, `48ade49`
+
+Relay fetch was hanging indefinitely when TCP connection established but server didn't respond.
+
+**Fix:** 12-second `Promise.race` hard timeout around relay call. Falls back to Meteora/local path on timeout.
+
+### 6. Swap Retry with Escalating Slippage (DONE)
+
+**File:** `tools/wallet.js`
+
+Swap retries up to 5 times with escalating slippage:
+| Attempt | Slippage |
+|---------|----------|
+| 1 | 0.5% (50 bps) |
+| 2 | 1.0% (100 bps) |
+| 3 | 2.0% (200 bps) |
+| 4 | 5.0% (500 bps) |
+| 5 | 10.0% (1000 bps) |
+
+Telegram notification on exhaustion: `notifySwapFailure()` in `telegram.js`.
+
+### 7. Xiaomi MiMo for Screening (DONE)
+
+**Config:**
+- Screening: `mimo-v2.5` via `https://token-plan-sgp.xiaomimimo.com/v1`
+- Management: `MiniMax-M2.5` via MiniMax API (`https://api.minimax.io/v1`)
+- Fallback: `stepfun/step-3.5-flash:free` via OpenRouter
+
+**Agent clients (`agent.js`):**
+- `client` (global) — MiniMax API for management/general
+- `getScreeningClient()` — Xiaomi endpoint for screening
+- `getFallbackClient()` — OpenRouter for fallback
+
+### 8. Darwinian Signal Weighting (DOCUMENTED)
+
+**Doc:** `docs/DARWINIAN_SIGNALS.md`
+
+**Known issue:** Feedback loop is broken. `signal_snapshot` is never populated on positions. `getAndClearStagedSignals()` is defined but never called. All weights stuck at 1.0 (defaults).
+
+**Fix needed:** Wire `getAndClearStagedSignals()` into `dlmm.js` deploy flow.
+
+---
+
+## 📋 CURRENT CONFIGURATION
+
+```json
+{
+  "closeProfile": "pecut",
+  "deployAmountSol": 0.25,
+  "maxPositions": 3,
+  "r8IndicatorCheck": true,
+  "r8ExitPreset": "supertrend_break",
+  "r8OorCooldownHours": 6,
+  "repeatDeployCooldownHours": 2,
+  "repeatDeployCooldownMinFeeEarnedPct": 1,
+  "allowedLaunchpads": ["pump.fun", "moonshot", "met-dbc", "meteora_virtual_curve"],
+  "blockedLaunchpads": ["letsbonk.fun"]
+}
+```
+
+---
+
+## 📁 KEY FILES
+
+| File | Purpose |
+|------|---------|
+| `index.js` | Main entry, management cycle, Telegram handlers, close engines |
+| `state.js` | Position state, exit rules, trailing TP, Safety-Lock, R8 gate |
+| `config.js` | All config schema and defaults |
+| `tools/dlmm.js` | DLMM SDK wrapper (deploy, close, positions, PnL) |
+| `tools/screening.js` | Pool discovery pipeline |
+| `tools/executor.js` | Tool dispatch, CONFIG_MAP, update_config |
+| `tools/api-monitor.js` | API health checks |
+| `tools/chart-indicators.js` | RSI/Supertrend/BB indicators (used by R8) |
+| `pool-cooldown.js` | Cooldown system per close reason |
+| `pool-memory.js` | Pool deploy history |
+| `lessons.js` | Performance recording + lesson derivation |
+| `hivemind.js` | HiveMind sync (lessons/presets only) |
+| `telegram.js` | Telegram bot, notifications |
+| `signal-weights.js` | Darwinian signal weighting (broken — see known issues) |
+
+---
+
+## ⚠️ KNOWN ISSUES
+
+### 1. Darwinian Signal Weighting Broken
+`signal_snapshot` never populated on positions. `getAndClearStagedSignals()` defined but never called. Weights stuck at 1.0. Needs wiring into `dlmm.js` deploy flow.
+
+### 2. Relay Raw Endpoint
+Upstream changed relay to `/positions/open/raw`. Bot currently falls back to Meteora portfolio API. May need server-side update for raw endpoint to work.
+
+### 3. Jupiter/Meteora API Issues
+Jupiter swap API: timeout errors. Meteora DLMM API: 404 errors. Both external — not bot issues.
+
+### 4. Encryption Key Placeholder
+`.envrypt` contains `replace-with-a-long-local-key` (placeholder). Encrypted keys in `.env` decrypt to garbage. Some keys are in plaintext in `.env` (SCREENING_LLM_API_KEY) or `.env.raw` (all keys).
+
+---
+
+## 🎯 PENDING WORK
+
+### Phase H: R8 Verification (Next)
+- Monitor R8 behavior with `profile=experimental`
+- Check `/observe held` for R8-held positions
+- Verify indicator confirmation logs
+
+### Darwinian Fix
+- Wire `getAndClearStagedSignals()` into `dlmm.js` deploy flow
+- Pass `signal_snapshot` to `trackPosition()` and `recordPerformance()`
+
+### Relay Raw Endpoint
+- Monitor if `/positions/open/raw` starts working (server-side update needed)
+- Current fallback to Meteora portfolio API works fine
+
+---
+
+## 🔧 ENVIRONMENT REFERENCE
+
+### Server
+- VM: `ubuntu@VM-0-3-ubuntu`
+- Path: `/home/ubuntu/projects/meridian`
+- Wallet backup: `/home/ubuntu/secure-backup/`
+
+### Git Remotes
+```
+origin    https://github.com/albertuscrs/meridian.git (my fork)
+upstream  https://github.com/yunus-0x/meridian (owner)
+```
+
+### Models
+- Screening: `mimo-v2.5` (Xiaomi Token Plan Singapore)
+- Management: `MiniMax-M2.5` (MiniMax API)
+- Fallback: `stepfun/step-3.5-flash:free` (OpenRouter)
+
+### Cron Intervals
+- Management: every 3 minutes
+- Screening: every 60 minutes
+- PnL poll: every 30 seconds
+
+### Backups
+```
+~/secure-backup/private_key.pem.backup
+~/secure-backup/public_key.pem.backup
+state.json.backup-* (multiple)
+```
+
+---
+
+## 📖 DOCUMENTATION
+
+- `docs/CLOSE_RULES_REFACTOR.md` — R1-R10 spec and implementation status
+- `docs/DARWINIAN_SIGNALS.md` — Darwinian signal weighting system
+- `docs/HANDOVER.md` — This file
+- `docs/pool-cooldown-plan.md` — Cooldown enhancement plan
+- `docs/hivemind-reference.md` — HiveMind reference
+- `docs/hivemind-summary.md` — HiveMind summary
+
+---
+
+## 🎯 SUCCESS CRITERIA
+
+The handover is successful when:
+1. ✅ All conflict files resolved with R-implementations preserved
+2. ✅ Auto-merged files audited (no silent R-logic loss)
+3. ✅ Syntax check passes on all .js files
+4. ✅ Merge commits created with detailed messages
+5. ✅ Push to fork (origin) succeeds
+6. ✅ Bot restarts cleanly
+7. ✅ R8 implemented and committed
+8. ✅ API monitoring system working
+9. ✅ Upstream relay enrichment integrated
+
+---
+
+## 📞 IF STUCK
+
+```bash
+# Nuclear option — abort merge, return to checkpoint
+git merge --abort
+# Working tree returns to commit 3cd16a3
+
+# Or full reset
+git reset --hard 3cd16a3
+cp state.json.backup-pre-merge-* state.json
+
+# Bot can restart safely from checkpoint state
+```
+
+---
+
+## 🤖 CONTEXT FOR NEW AI ASSISTANT
+
+1. User has been working on R1-R10 refactor for ~2 weeks
+2. All R-implementations verified in production with logs/data evidence
+3. R8 (Indicator-Aware OOR Close) implemented and committed
+4. Merge with upstream complete — relay enrichment refactor integrated
+5. API monitoring system operational via Telegram `/status` commands
+6. Bot running stable with profile=pecut, model=mimo-v2.5
+7. Darwinian signal weighting system is broken (needs fix)
+8. Relay raw endpoint may need server-side update
+9. User prefers data-driven decisions and step-by-step verification
+10. Read `docs/CLOSE_RULES_REFACTOR.md` for full R1-R10 context
+11. Read `docs/DARWINIAN_SIGNALS.md` for signal weighting context
+
+Good luck.

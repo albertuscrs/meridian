@@ -354,6 +354,7 @@ const toolMap = {
       repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
+      emergencyClosePct: ["management", "emergencyClosePct"],
       minProfitPctToCloseOOR: ["management", "minProfitPctToCloseOOR"],
       closeProfile: ["management", "closeProfile"],
       r8IndicatorCheck: ["management", "r8IndicatorCheck"],

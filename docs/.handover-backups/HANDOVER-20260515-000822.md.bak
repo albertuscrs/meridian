@@ -144,42 +144,13 @@ Telegram notification on exhaustion: `notifySwapFailure()` in `telegram.js`.
 - `getScreeningClient()` — Xiaomi endpoint for screening
 - `getFallbackClient()` — OpenRouter for fallback
 
-### 8. Darwinian Signal Weighting (FIXED — 2026-05-17)
+### 8. Darwinian Signal Weighting (DOCUMENTED)
 
 **Doc:** `docs/DARWINIAN_SIGNALS.md`
 
-**Fixed via upstream merge `7642e2c`:** `getAndClearStagedSignals()` now called at both `trackPosition()` call sites in `tools/dlmm.js`. `signal_snapshot` is now populated on every position. Also: `signal-tracker.js` gained base_mint fallback index; `signal-weights.js` gained `getEntrySignalSnapshot()` for backward compat with old entries; `lessons.js` gained `buildSignalSnapshot()` helper.
+**Known issue:** Feedback loop is broken. `signal_snapshot` is never populated on positions. `getAndClearStagedSignals()` is defined but never called. All weights stuck at 1.0 (defaults).
 
-### 9. Upstream Merge — SOL PnL + Darwin Signals (DONE — 2026-05-17)
-
-**Commit:** `8b472c1` (merge of upstream `7642e2c`)
-
-**Changes from upstream:**
-- `tools/dlmm.js`: `getPositionPnl()` and `closePosition()` now respect `solMode` config — PnL reported in SOL when `solMode: true`. Uses `getClosedPnlValue()` / `getClosedPnlPct()` helpers.
-- `tools/dlmm.js`: `getMyPositions()` accepts optional `wallet_address` param for checking arbitrary wallets.
-- `signal-tracker.js`: dual-index by pool address + base_mint, TTL-based cleanup.
-- `signal-weights.js`: `getEntrySignalSnapshot()` reads signal fields from both `signal_snapshot` field and flat entry fields (backward compat).
-- `lessons.js`: `buildSignalSnapshot()` merges staged + tracked signals.
-- `index.js`: `getTrackedPositions` import, `base_mint` added to `stageSignals` call, early-return pnl poll when no positions.
-
-**Conflict resolution:** Kept our `pnlSol`/`pnlSolPct` explicit vars alongside upstream helpers; kept extra return fields (`pnl_sol`, `fees_sol`, `minutes_held`); restored `queueTrailingDropConfirmation` import lost from our branch.
-
-### 10. Regression Test Suite (DONE — 2026-05-17)
-
-**Commit:** `03979b0`
-**File:** `test/regression-test.js`
-**Run:** `node test/regression-test.js`
-
-35 inline unit tests covering all custom R-implementations (no file I/O, fast):
-
-| Group | Cases | Coverage |
-|-------|-------|----------|
-| R1 Stop Loss | 4 | threshold, suspicious bypass, exact boundary |
-| R2/R4.1 Trailing TP | 4 | always TRAILING_TP_QUEUED, drop threshold, OOR order |
-| R7 Safety-Lock | 7 | pecut+experimental, above+below, pnl=0, main no-lock |
-| R8 Indicator-Aware | 6 | hold, close, fail-open, profile guard, trailing bypass |
-| R5 Low Yield | 4 | age gate, custom minAge, fee above min |
-| F1 signal-tracker | 7 | pool lookup, base_mint fallback, clear-after-retrieval, null safety |
+**Fix needed:** Wire `getAndClearStagedSignals()` into `dlmm.js` deploy flow.
 
 ---
 
@@ -187,9 +158,9 @@ Telegram notification on exhaustion: `notifySwapFailure()` in `telegram.js`.
 
 ```json
 {
-  "closeProfile": "experimental",
+  "closeProfile": "pecut",
   "deployAmountSol": 0.25,
-  "maxPositions": 2,
+  "maxPositions": 3,
   "r8IndicatorCheck": true,
   "r8ExitPreset": "supertrend_break",
   "r8OorCooldownHours": 6,
@@ -225,20 +196,17 @@ Telegram notification on exhaustion: `notifySwapFailure()` in `telegram.js`.
 
 ## ⚠️ KNOWN ISSUES
 
-### 1. ~~Darwinian Signal Weighting Broken~~ ✅ FIXED (2026-05-17)
-Resolved via upstream merge `7642e2c`. `getAndClearStagedSignals()` now called at both `trackPosition()` call sites. Signal snapshots stored in state.json + lessons.json.
+### 1. Darwinian Signal Weighting Broken
+`signal_snapshot` never populated on positions. `getAndClearStagedSignals()` defined but never called. Weights stuck at 1.0. Needs wiring into `dlmm.js` deploy flow.
 
-### 2. Stop Loss is #1 Capital Destroyer
-23 SL events since May 1 (7.2% of closes). 3 catastrophic outliers (>10% loss) account for ~50% of total SL losses. Screening metrics cannot distinguish SL-prone pools — fee/TVL at deploy is actually HIGHER for SL positions (1.60 vs 0.89). See Stop Loss Deep-Dive section above. Emergency exit at -10% recommended.
+### 2. Relay Raw Endpoint
+Upstream changed relay to `/positions/open/raw`. Bot currently falls back to Meteora portfolio API. May need server-side update for raw endpoint to work.
 
-### 3. Encryption Key Placeholder
-`.envrypt` contains `replace-with-a-long-local-key` (placeholder). Encrypted keys in `.env` decrypt to garbage. Some keys are in plaintext in `.env` (SCREENING_LLM_API_KEY) or `.env.raw` (all keys).
-
-### 4. Relay Raw Endpoint
-Upstream changed relay to `/positions/open/raw`. Bot currently falls back to Meteora portfolio API.
-
-### 5. Jupiter/Meteora API Issues
+### 3. Jupiter/Meteora API Issues
 Jupiter swap API: timeout errors. Meteora DLMM API: 404 errors. Both external — not bot issues.
+
+### 4. Encryption Key Placeholder
+`.envrypt` contains `replace-with-a-long-local-key` (placeholder). Encrypted keys in `.env` decrypt to garbage. Some keys are in plaintext in `.env` (SCREENING_LLM_API_KEY) or `.env.raw` (all keys).
 
 ---
 
@@ -281,9 +249,6 @@ upstream  https://github.com/yunus-0x/meridian (owner)
 - Management: every 3 minutes
 - Screening: every 60 minutes
 - PnL poll: every 30 seconds
-
-> **Note:** These are production overrides set in `user-config.json` (`managementIntervalMin: 3`, `screeningIntervalMin: 60`).
-> `config.js` defaults are 10m / 30m respectively. The PnL poll interval is hardcoded in `index.js`.
 
 ### Backups
 ```
@@ -497,9 +462,12 @@ Priority order based on impact × effort × stability:
 
 ### Tier 1: Critical Fixes (After R8 Verified)
 
-#### ✅ F1: Darwinian Signal Wiring (DONE — 2026-05-17)
-**Resolved via:** upstream merge `7642e2c`
-Upstream independently fixed this: `getAndClearStagedSignals()` now called at both `trackPosition()` call sites in `tools/dlmm.js`. Signal snapshots stored in state.json + lessons.json. `signal-tracker.js` also gained base_mint fallback index. Darwinian weight evolution is now fully wired.
+#### F1: Darwinian Signal Wiring (KNOWN ISSUE)
+**Effort:** Medium (~30-60 lines)
+**Impact:** High (currently 0 — feedback loop broken)
+**Approach:** Wire `getAndClearStagedSignals()` into `tools/dlmm.js` deploy flow.
+Pass `signal_snapshot` through `trackPosition()` → `recordPerformance()` →
+weight evolution. See `docs/DARWINIAN_SIGNALS.md` for full spec.
 
 #### F2: Encryption Key Placeholder (SECURITY)
 **Effort:** Small (~15 minutes)
@@ -553,9 +521,11 @@ E.g., pool that lost money 3x in last week → auto-cooldown longer.
 
 ### Tier 4: Maintenance & Health
 
-#### ✅ M1: Test Infrastructure (DONE — 2026-05-17)
-`test/regression-test.js` added — 35 cases covering R1/R2/R4.1/R5/R7/R8/F1 signal-tracker.
-Run: `node test/regression-test.js`. Existing: `pool-cooldown-test.js` (6), `test-solmode-pnl.js` (10).
+#### M1: Test Infrastructure
+**Effort:** Medium
+**Impact:** Medium (regression safety)
+**Approach:** Expand `test/pool-cooldown-test.js` pattern to other modules.
+Add inline-predicate tests to a runnable suite (`npm test`).
 
 #### M2: Upstream Sync Cadence
 **Effort:** Small (recurring)
@@ -596,185 +566,6 @@ Format: `**YYYY-MM-DD** — Brief description (commit hash)`
 - **2026-05-09** — Fork created, security hardening
 - **2026-05-10** — Merge with upstream complete (commit 56c04ee)
 - **2026-05-12** — R8 implemented (commit b022962)
-- **2026-05-13** — API monitoring + relay enrichment merge (commit 2837752); Phase H activated (closeProfile → experimental)
-- **2026-05-15** — Phase H monitoring: R8 pre-fetch ✅ (54x May 14), R8 holds 4x (May 13), Safety-Lock 20x (May 14), 0 errors
-- **2026-05-17** — Phase H verdict: 🟢 GREEN — 3 unique R8-held positions (11 events May 12-16), 0 close at loss, mechanism confirmed working. Next: F1 Darwinian signal wiring.
-- **2026-05-17** — Upstream merge `7642e2c` (sol pnl + darwin signal fix); F1 resolved via merge; regression test suite added (35 cases, commits 8b472c1 + 03979b0)
-- **2026-05-18** — Stop Loss deep-dive analysis (23 SL since May 1); catastrophic outlier identification; emergency exit plan drafted
-
----
-
-## 🔬 PHASE H STATUS — R8 Experimental Profile Monitoring
-
-**Started:** 2026-05-12 00:16 UTC (closeProfile flipped pecut → experimental via Telegram settings)
-**Verified:** 2026-05-17
-**Verdict:** 🟢 GREEN — mechanism confirmed, all outcomes neutral-to-positive, 0 errors in 5 days
-
-### Config Snapshot (at Phase H start)
-```json
-"closeProfile": "experimental",
-"r8ExitPreset": "supertrend_break",
-"chartIndicators": { "enabled": true, "exitPreset": "bb_plus_rsi" }
-```
-
-### Evidence Collected
-
-#### R8 Pre-fetch Activity (May 14)
-- **54 pre-fetches** logged: `[MGMT] R8 pre-fetch:` across management cycles
-- Confirms indicator data successfully retrieved and stored in `indicatorData` Map
-- No API errors or timeout failures observed
-
-#### R8 Hold Events (May 13 — position HWEXubSXt1Y6...)
-- R8 gate fired at OOR timeout (35m above), indicator returned `confirmed: false`
-- Position held for 38–56 minutes extra by R8
-- Eventually closed by Rule 3 (pump close) at **+0.18% PnL**
-- Outcome: Better than instant OOR close — R8 hold gave position time to earn a small profit before pump ejection
-- Total R8 holds observed: **4x** (threshold for confidence: 5+)
-
-#### Safety-Lock Activity (May 14)
-- **20 Safety-Lock events** logged: `[STATE] Safety-Lock:` across management cycles
-- All cases: OOR timeout reached with `pnl_pct ≤ 0`, position held instead of closed
-- Confirmed case: position B62BoSYFrPyMQvN22 held at 35–44m OOR (pnl=0.00%), came back IN RANGE at 44m
-- Safety-Lock demonstrably preventing unnecessary closes of zero-PnL positions
-
-#### Error Count
-- R8 path errors: **0**
-- Fail-open triggers (API unavailable): **0**
-- Trailing TP bypasses: **0**
-
-### Gate Order Verified
-```
-OOR timeout reached
-  → trailingArmed? → OUT_OF_RANGE (immediate, no gate)
-  → Safety-Lock (R7): pnl_pct ≤ 0 → STAY
-  → R8: confirmIndicatorPreset() → confirmed:false → STAY / confirmed:true → OUT_OF_RANGE
-  → OUT_OF_RANGE (default)
-```
-
-### Phase H Success Criteria
-| Criterion | Target | Status |
-|-----------|--------|--------|
-| 0 critical errors | 0 | ✅ 0 errors |
-| R8 holds observed | ≥5 | ✅ 11 events, 3 unique positions |
-| Safety-Lock working | Active | ✅ 20 events |
-| Fail-open working | No crashes | ✅ confirmed |
-| Trailing TP unaffected | 0 bypasses | ✅ confirmed |
-
-### Next Steps After 48h
-1. Confirm R8 hold count reaches 5+ (continue monitoring)
-2. If verdict GREEN: update CLOSE_RULES_REFACTOR.md R8 status from "Phase H pending" → "Production verified (YYYY-MM-DD)"
-3. Decide on F1 (Darwinian signal wiring fix) as next priority
-4. Long-term: R6 HiveMind sync at close (needs R8 stable 1+ week first)
-
----
-
-## 🩸 STOP LOSS DEEP-DIVE — 2026-05-18
-
-**Dataset:** All 321 closed positions since May 1, 2026. 23 hit Stop Loss (7.2%).
-
-### Key Finding: Screening metrics CANNOT distinguish SL from non-SL
-
-```
-                    SL (23)      Non-SL (298)
-─────────────────────────────────────────────
-fee/TVL median       1.60          0.89
-volatility median    4.35          4.35
-organic median       80            80
-hold time median     61 min        60 min
-initial value        $42           $42.50
-```
-
-**SL positions actually have 1.8x HIGHER fee/TVL at deploy time than non-SL.** This is counterintuitive: pools with "good" fee/TVL (1.60+) are MORE likely to hit stop loss. High fee/TVL may be a contrarian indicator — pools that look too good attract LPers but may harbor insider dumpers.
-
-### Catastrophic Outliers (>10% loss)
-
-| Pool | PnL | Hold | fee/TVL | Notes |
-|------|-----|------|---------|-------|
-| RoyalPop-SOL | **-30.72%** | 34 min | 3.17 | Toxic — 2 SL out of 3 deploys |
-| OPM-SOL | **-17.06%** | 33 min | 2.22 | Instant crash |
-| BMNTP-SOL | **-16.11%** | 55 min | 1.69 | Instant crash |
-
-These 3 positions account for ~50% of total SL loss. All crashed in under 1 hour — these are token ilo dumps, not slow bleeds.
-
-### Time-of-Day Pattern
-
-```
-00-04 UTC: SL rate 11.8-18.2%  (⚠️ high risk)
-05-09 UTC: SL rate 0%          (✅ zero SL, 47 deploys)
-10-15 UTC: SL rate 7.7-10%     (normal)
-16-17 UTC: SL rate 12.5-15%    (⚠️ high risk)
-```
-
-05:00-09:00 UTC (12:00-16:00 WIB) — 47 deploys, ZERO SL. The "clean window." Outside this window, SL rate jumps 2-3x.
-
-### Repeat Offenders (pools with 2+ SL)
-
-| Pool | Total Deploys | SL Count | Note |
-|------|---------------|----------|------|
-| SELLOR-SOL | 5 | 2 | Profitable early → turned toxic |
-| RoyalPop-SOL | 3 | 2 | Should be blacklisted |
-| Yae-SOL | 4 | 2 | 22min crash + 284min bleed |
-
-**Cooldown gaps as low as 2 hours** after SL — `stopLossCooldownHours=2` is too short. HANTA-SOL, mask-SOL, Bear-SOL all re-deployed within 2h of hitting SL.
-
-### PnL Breakdown
-
-| Reason | Count | Fees | PnL |
-|--------|-------|------|-----|
-| Trailing TP | 14 | $17.79 | +$11.55 |
-| Stop Loss | 9 | $8.46 | **-$15.91** |
-| Rule 3 (pump) | 43 | $3.58 | +$3.05 |
-| Low Yield | 33 | $1.47 | +$0.60 |
-
-Without the 9 SL positions: net PnL would be +$15.21 instead of near breakeven. Stop loss is the #1 capital destroyer.
-
----
-
-## 🎯 NEW RECOMMENDATIONS (2026-05-18)
-
-### Tier 1: Emergency Exit at -10% (Option A)
-
-**Impact:** HIGH — would have caught 100% of catastrophic outliers  
-**Effort:** ~20 lines across 3 files  
-**Status:** NOT YET IMPLEMENTED
-
-**The problem:** During a fast crash, the current flow is:
-1. PnL poll detects SL at -5% (up to 30s delay)
-2. Cooldown check (up to 180s delay)
-3. Triggers `runManagementCycle()` → LLM roundtrip (30-60s)
-4. Position bleeds while waiting — worst case RoyalPop went from -5% to -30.72%
-
-**The fix:** Add hard emergency exit at -10% that bypasses ALL waits:
-- `config.js`: New key `emergencyClosePct` (default -10)
-- `state.js`: Emergency check BEFORE Rule 1 — returns `EMERGENCY_CLOSE` action (no gates, no Safety-Lock, no R8)
-- `index.js`: PnL poll bypasses cooldown for `EMERGENCY_CLOSE` — closes directly via `executeTool("close_position")` without LLM
-
-**Bottleneck fix:** Current management cycle cooldown (180s) blocks PnL poll from re-triggering. Emergency exit bypasses this entirely.
-
-### Tier 2: Fee Drift Detection
-
-**Impact:** HIGH — prevents deploying into temporary fee spikes  
-**Effort:** ~30 lines in `tools/screening.js` or `executor.js`
-
-Compare fee/TVL across two timeframes before deploy:
-```
-fee_tvl_1h vs fee_tvl_24h
-If fee_tvl_1h > 3x fee_tvl_24h → flag as "fee spike", skip deploy
-```
-
-Rationale: SL positions had higher fee/TVL (1.60 median) than non-SL (0.89). High fee/TVL that doesn't sustain across longer timeframes is a honeypot signal. Currently 76% of positions die young (43% pumped out + 33% low yield) — fee drift detection catches the root cause.
-
-### Tier 3: Config Tuning
-
-| Change | From | To | Rationale |
-|--------|------|----|-----------|
-| `stopLossCooldownHours` | 2 | 6 | Prevent fast re-deploy into pools that just SL'd |
-| `minVolatility` | 3 | 3.5-4 | Reduce pump-frequency pools (43% Rule 3 closes) |
-
-### Tier 4: Base-mint Blacklist After Catastrophic SL
-
-If a base_mint ever hits SL with PnL < -10%, block all pools with that base_mint for 48 hours. RoyalPop-SOL (base_mint `8TbnsLM...`) hit -30.72% and was re-deployed 2 days later — hitting SL again at -5.07%.
-
-### Tier 5: Screening Time-of-Day Awareness
-
-Skip deploy if token age < 24 hours AND current hour is in high-risk window (00-04 UTC or 16-17 UTC). Zero SL during 05-09 UTC suggests pool quality varies significantly by time of day.
+- **2026-05-13** — API monitoring + relay enrichment merge (commit 2837752)
+- **2026-05-XX** — R8 production verification activated (Phase H)
+- **2026-05-XX** — R8 verdict & next priority decision

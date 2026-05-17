@@ -430,6 +430,17 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (changed) save(state);
 
+  // ── Rule 0: Emergency Close ────────────────────────────────────
+  // Hard override at emergencyClosePct (default -10%). Fires before
+  // all other rules — bypasses every gate including Safety-Lock and R8.
+  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.emergencyClosePct != null && currentPnlPct <= mgmtConfig.emergencyClosePct) {
+    return {
+      action: "EMERGENCY_CLOSE",
+      reason: `Emergency close: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.emergencyClosePct}%`,
+      profile,
+    };
+  }
+
   // ── Rule 1: Stop Loss ──────────────────────────────────────────
   // pecut/experimental: LLM-eval path not yet implemented (R3) — falls through to main behaviour
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
