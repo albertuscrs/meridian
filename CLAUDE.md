@@ -279,19 +279,22 @@ Not required for normal operation.
 
 Three behavioral profiles for close rules, set via `config.management.closeProfile`:
 
-| Profile | R4 OOR | R7 Safety-Lock | R8 Indicator |
-|---------|--------|----------------|--------------|
-| `main` | Time-based (35m above / 8m below) | No | No |
-| `pecut` | Time-based + Safety-Lock | Yes | No |
-| `experimental` | Time-based + Safety-Lock + R8 | Yes | Yes |
+| Profile | R4 OOR | R7 Safety-Lock | R8 Indicator | Rule 0 Emergency |
+|---------|--------|----------------|--------------|------------------|
+| `main` | Time-based (35m above / 8m below) | No | No | Yes (all profiles) |
+| `pecut` | Time-based + Safety-Lock | Yes | No | Yes |
+| `experimental` | Time-based + Safety-Lock + R8 | Yes | Yes | Yes |
 
 **Active in production:** `experimental` (since 2026-05-12)
+
+**Rule 0 Emergency Close** (`config.management.emergencyClosePct`, default -10): Hard override at catastrophic PnL threshold. Fires BEFORE all other rules — bypasses Safety-Lock, R8, trailing, and cooldown entirely. Log marker: `[STATE] Emergency close:`. Configurable via `/settings` Risk page.
 
 **R7 Safety-Lock** (`pecut` + `experimental`): if OOR timeout reached but `pnl_pct ≤ 0`, hold instead of close. Log marker: `[STATE] Safety-Lock:`
 
 **R8 Indicator-Aware OOR** (`experimental` only): pre-fetches chart indicators before closing OOR positions. If `confirmIndicatorPreset()` returns `confirmed: false`, hold. Fail-open: API unavailable → close normally (never blocks on error).
 - Config: `r8IndicatorCheck` (toggle), `r8ExitPreset` (preset name), `r8OorCooldownHours`
 - Gate order: OOR timeout → trailingArmed? → R7 Safety-Lock → R8 → OUT_OF_RANGE
+- Rule 0 Emergency fires BEFORE everything (even before R1 Stop Loss)
 
 **R4.1 Trailing TP** (all profiles): state.js Rule 2 always returns `{ action: "TRAILING_TP_QUEUED" }` — callers schedule timer-based confirmation (3s pecut / 15s main+experimental). Never instant-close.
 
@@ -326,3 +329,30 @@ Also: `test/pool-cooldown-test.js` (6 cooldown scenarios), `test/test-solmode-pn
 ## Known Issues / Tech Debt
 
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
+
+## Recent Additions (May 2026)
+
+### API Monitoring (`tools/api-monitor.js`)
+Telegram `/status` subcommands check health of all external APIs:
+- `/status apis` — all APIs (relay, hivemind, gmgn, jupiter, meteora, rpc)
+- `/status relay|hivemind|gmgn|jupiter|meteora|rpc` — individual checks
+Each shows ✅/❌ status, HTTP code, latency, error details.
+
+### Consumer LLM Clients (`agent.js`)
+Three-tier client architecture for LLM routing:
+- `client` (global): MiniMax API for management/general
+- `getScreeningClient()`: Xiaomi endpoint for screening (mimo-v2.5)
+- `getFallbackClient()`: OpenRouter for fallback (stepfun/step-3.5-flash:free)
+Config: `screeningBaseUrl`, `screeningApiKey`, `fallbackBaseUrl`, `fallbackApiKey`, `fallbackModel`.
+
+### Swap Retry (`tools/wallet.js`)
+Swap retries up to 5x with escalating slippage (0.5%→10%).
+Telegram notification on exhaustion via `notifySwapFailure()`.
+
+### Launchpad Filtering for GMGN (`tools/gmgn.js`)
+GMGN screening pipeline now filters `blockedLaunchpads` at Stage 2.
+Previously only Meteora pipeline had this filter.
+
+### Screening Cooldown (`index.js`)
+Management cycle respects `screeningIntervalMin` when triggering screening on no-position.
+No longer spams screening every 3 minutes when no positions open.

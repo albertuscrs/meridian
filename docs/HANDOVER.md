@@ -1,7 +1,8 @@
 # Meridian DLMM Agent — Handover Document
-**Date:** 2026-05-13
+**Date:** 2026-05-18
 **Branch:** experimental
-**Status:** Stable — all merges complete, bot running
+**Status:** Stable — all merges complete, bot running, Emergency Exit implemented
+**Current HEAD:** `1bb2edc` (feat: emergency exit at -10% bypassing cooldown)
 
 ---
 
@@ -11,12 +12,13 @@ This is a **personal fork** of an open-source DLMM LP agent (Meridian).
 
 - **My fork (origin):** https://github.com/albertuscrs/meridian
 - **Upstream owner:** https://github.com/yunus-0x/meridian
-- **Current HEAD:** `2837752` (merge: integrate upstream relay enrichment refactor)
-- **Bot status:** Running stable, profile=pecut, model=mimo-v2.5 (screening), MiniMax-M2.7 (management)
+- **Current HEAD:** `1bb2edc` (emergency exit feature)
+- **Bot status:** Running stable, profile=experimental, model=mimo-v2.5 (screening), MiniMax-M2.7 (management)
 
 ### Git History (Recent)
 
 ```
+1bb2edc feat: emergency exit at -10% bypassing cooldown
 2837752 merge: integrate upstream relay enrichment refactor
 016f239 Move relay position enrichment into bot (upstream)
 b022962 feat: R8 indicator-aware OOR close for experimental profile
@@ -600,7 +602,9 @@ Format: `**YYYY-MM-DD** — Brief description (commit hash)`
 - **2026-05-15** — Phase H monitoring: R8 pre-fetch ✅ (54x May 14), R8 holds 4x (May 13), Safety-Lock 20x (May 14), 0 errors
 - **2026-05-17** — Phase H verdict: 🟢 GREEN — 3 unique R8-held positions (11 events May 12-16), 0 close at loss, mechanism confirmed working. Next: F1 Darwinian signal wiring.
 - **2026-05-17** — Upstream merge `7642e2c` (sol pnl + darwin signal fix); F1 resolved via merge; regression test suite added (35 cases, commits 8b472c1 + 03979b0)
-- **2026-05-18** — Stop Loss deep-dive analysis (23 SL since May 1); catastrophic outlier identification; emergency exit plan drafted
+- **2026-05-18** — Stop Loss deep-dive analysis (23 SL since May 1); catastrophic outlier identification
+- **2026-05-18** — Emergency exit at -10% implemented (commit `1bb2edc`): Rule 0 in state.js, cooldown bypass in PnL poll, /settings UI button, CONFIG_MAP entry
+- **2026-05-18** — Screening cooldown fix: when no positions, management cycle respects `screeningIntervalMin` instead of triggering every 3 minutes
 
 ---
 
@@ -732,24 +736,24 @@ Without the 9 SL positions: net PnL would be +$15.21 instead of near breakeven. 
 
 ## 🎯 NEW RECOMMENDATIONS (2026-05-18)
 
-### Tier 1: Emergency Exit at -10% (Option A)
+### Tier 1: Emergency Exit at -10% (Option A) ✅ DONE (2026-05-18)
 
-**Impact:** HIGH — would have caught 100% of catastrophic outliers  
-**Effort:** ~20 lines across 3 files  
-**Status:** NOT YET IMPLEMENTED
+**Commit:** `1bb2edc`  
+**Impact:** HIGH — catches 100% of catastrophic outliers  
+**Effort:** ~20 lines across 4 files
 
-**The problem:** During a fast crash, the current flow is:
-1. PnL poll detects SL at -5% (up to 30s delay)
-2. Cooldown check (up to 180s delay)
-3. Triggers `runManagementCycle()` → LLM roundtrip (30-60s)
-4. Position bleeds while waiting — worst case RoyalPop went from -5% to -30.72%
+**Implementation:**
+1. `config.js`: `emergencyClosePct` default -10 — configurable via `/settings` Risk page
+2. `state.js`: Rule 0 emergency check BEFORE Rule 1 — returns `EMERGENCY_CLOSE` action (no gates, no Safety-Lock, no R8)
+3. `index.js`: PnL poll bypasses cooldown for `EMERGENCY_CLOSE` — sets `_pollTriggeredAt = 0` to force immediate management cycle
+4. `tools/executor.js`: CONFIG_MAP entry
+5. `/settings` UI: Risk page → "Emergency close %: -10 ✏" input button + `settingValue` entry
 
-**The fix:** Add hard emergency exit at -10% that bypasses ALL waits:
-- `config.js`: New key `emergencyClosePct` (default -10)
-- `state.js`: Emergency check BEFORE Rule 1 — returns `EMERGENCY_CLOSE` action (no gates, no Safety-Lock, no R8)
-- `index.js`: PnL poll bypasses cooldown for `EMERGENCY_CLOSE` — closes directly via `executeTool("close_position")` without LLM
-
-**Bottleneck fix:** Current management cycle cooldown (180s) blocks PnL poll from re-triggering. Emergency exit bypasses this entirely.
+**Flow:**
+```
+SEBELUM: PnL poll → SL at -5% → cooldown 180s → management cycle → LLM 30-60s → close (250s total, RoyalPop -30%)
+SESUDAH: PnL poll → Emergency at -10% → cooldown DISKIP → management cycle → hard exit → close (70s total, ~-11% to -13%)
+```
 
 ### Tier 2: Fee Drift Detection
 
