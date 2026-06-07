@@ -1,7 +1,8 @@
 import fs from "fs";
 import path from "path";
+import { repoPath } from "./repo-root.js";
 
-const LOG_DIR = "./logs";
+const LOG_DIR = repoPath("logs");
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 const LOG_RETENTION_DAYS = Number(process.env.LOG_RETENTION_DAYS || 7);
 
