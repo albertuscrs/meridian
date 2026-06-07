@@ -228,6 +228,35 @@ export function queuePeakConfirmation(position_address, candidatePnlPct, options
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return false;
 
+  // ── Emergency Floor Check (PnL Poll Gap fix) ──
+  // MUST come BEFORE peak gate — PnL descending would skip this check entirely
+  // if we let the peak gate return false first.
+  // Discovered via Embrace/SOL post-mortem 2026-05-20.
+  const emergencyThreshold = options.emergencyClosePct ?? null;
+  if (emergencyThreshold != null && candidatePnlPct <= emergencyThreshold) {
+    log("state", `[PnL poll] Emergency floor breached: ${position_address} PnL ${candidatePnlPct.toFixed(2)}% <= ${emergencyThreshold}% — flagging for immediate close`);
+    pos.emergency_close_flagged_at = new Date().toISOString();
+    pos.emergency_close_pnl_pct = candidatePnlPct;
+    save(state);
+    return {
+      emergency: true,
+      action: "EMERGENCY_CLOSE",
+      reason: `Emergency close (via poll): PnL ${candidatePnlPct.toFixed(2)}% <= ${emergencyThreshold}%`,
+      profile: options.closeProfile ?? "main",
+    };
+  }
+
+  // ── Diagnostic Log (throttled 5 min per position) ──
+  // Provides forensic trail when PnL is descending below peak (no other logs)
+  const DIAG_LOG_INTERVAL_MS = 5 * 60 * 1000;
+  const lastDiag = pos.last_pnl_diag_log_at ? new Date(pos.last_pnl_diag_log_at).getTime() : 0;
+  if (Date.now() - lastDiag > DIAG_LOG_INTERVAL_MS) {
+    log("state", `[PnL poll diag] ${position_address} pnl=${candidatePnlPct.toFixed(2)}% peak=${(pos.peak_pnl_pct ?? 0).toFixed(2)}% in_range=${!pos.out_of_range_since} held=${Math.round((Date.now() - new Date(pos.deployed_at).getTime()) / 60000)}m`);
+    pos.last_pnl_diag_log_at = new Date().toISOString();
+    // Don't save yet — let next save batch this
+  }
+
+  // ── Peak gate (existing, unchanged) ──
   const currentPeak = pos.peak_pnl_pct ?? 0;
   if (candidatePnlPct <= currentPeak) return false;
 

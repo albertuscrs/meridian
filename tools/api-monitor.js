@@ -75,17 +75,21 @@ export async function checkGmgnIndicators() {
 }
 
 export async function checkJupiter() {
-  const url = "https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50";
+  const apiKey = config.jupiter?.apiKey || "";
+  const url = "https://api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112";
   const start = Date.now();
-  const res = await fetchWithTimeout(url);
+  const res = await fetchWithTimeout(url, {
+    headers: apiKey ? { "x-api-key": apiKey } : {},
+  });
   const latency = Date.now() - start;
+  const isOk = res.ok && !res.data?.includes?.("error");
   return {
-    name: "Jupiter Swap",
-    url: "jup.ag",
+    name: "Jupiter API",
+    url: "api.jup.ag",
     status: res.status,
-    ok: res.ok,
+    ok: isOk,
     latency,
-    error: res.ok ? null : (res.data?.slice(0, 100) || `HTTP ${res.status}`),
+    error: isOk ? null : (res.data?.slice(0, 100) || `HTTP ${res.status}`),
   };
 }
 

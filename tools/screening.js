@@ -654,6 +654,28 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         pushFilteredReason(filteredOut, p, `volatility ${p.volatility} exceeds max ${maxVol}`);
         return false;
       }
+      // Layer 1: Fee Decline — reject pools with crashing fees
+      if (config.screening.feeDriftCheck) {
+        const feeChangePct = Number(p.fee_change_pct);
+        const maxDecline = numeric(config.screening.maxFeeDeclinePct);
+        if (maxDecline != null && Number.isFinite(feeChangePct) && feeChangePct < maxDecline) {
+          log("screening", `Filtered fee-decline pool ${p.name} (fee_change_pct=${feeChangePct}% < max=${maxDecline}%)`);
+          pushFilteredReason(filteredOut, p, `fees declining ${feeChangePct}% (max ${maxDecline}%)`);
+          return false;
+        }
+      }
+      // Time-of-Day: skip young tokens in high-risk UTC windows
+      if (config.screening.timeOfDayCheck) {
+        const currentHour = new Date().getUTCHours();
+        const riskyHours = config.screening.riskyHours || [];
+        const tokenAgeHours = p.token_age_hours ?? null;
+        const minAge = config.screening.minTokenAgeForTimeCheck ?? 24;
+        if (riskyHours.includes(currentHour) && tokenAgeHours != null && tokenAgeHours < minAge) {
+          log("screening", `Filtered time-of-day pool ${p.name} (hour=${currentHour} UTC, age=${tokenAgeHours}h < ${minAge}h)`);
+          pushFilteredReason(filteredOut, p, `risky window ${currentHour}:00 UTC + young token (${tokenAgeHours}h < ${minAge}h)`);
+          return false;
+        }
+      }
       return true;
     })
     .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))

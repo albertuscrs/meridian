@@ -19,6 +19,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
+import { addToBlacklist } from "./token-blacklist.js";
 
 const POOL_MEMORY_FILE = "./pool-memory.json";
 
@@ -371,6 +372,17 @@ export function evaluateAndSetCooldown(closeData) {
     if (base_mint && hours > baseMintCooldownHours) {
       baseMintCooldownHours = hours;
       baseMintCooldownReason = CLOSE_REASON_STOP_LOSS;
+    }
+
+    // Catastrophic SL: blacklist base_mint permanently (pnlPct < -10%)
+    const emergencyThreshold = config.management.emergencyClosePct ?? -10;
+    if (base_mint && pnlPct != null && pnlPct <= emergencyThreshold) {
+      addToBlacklist({
+        mint: base_mint,
+        symbol: pool_name || "UNKNOWN",
+        reason: `Catastrophic SL: ${pnlPct.toFixed(1)}% loss (threshold ${emergencyThreshold}%)`,
+      });
+      log("pool-cooldown", `Blacklisted ${base_mint.slice(0, 8)} — catastrophic SL ${pnlPct.toFixed(1)}%`);
     }
   }
 

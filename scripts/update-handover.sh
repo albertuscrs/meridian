@@ -5,9 +5,14 @@
 
 set -euo pipefail
 
-HANDOVER_PATH="docs/HANDOVER.md"
-NEW_SECTION_PATH="docs/_handover-append.md"  # temporary file with new content
-BACKUP_DIR="docs/.handover-backups"
+# Resolve script location, then derive project root
+# This makes the script runnable from any directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+HANDOVER_PATH="$PROJECT_ROOT/docs/HANDOVER.md"
+NEW_SECTION_PATH="$PROJECT_ROOT/docs/_handover-append.md"
+BACKUP_DIR="$PROJECT_ROOT/docs/.handover-backups"
 
 # Color output
 RED='\033[0;31m'

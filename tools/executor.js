@@ -146,6 +146,48 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
+  // ─── Fee Drift Detection ───
+  if (config.screening.feeDriftCheck) {
+    // Layer 1: Fee Decline — reject if fee_change_pct is crashing
+    const feeChangePct = numberOrNull(detail?.fee_change_pct);
+    const maxDecline = numberOrNull(config.screening.maxFeeDeclinePct);
+    if (maxDecline != null && feeChangePct != null && feeChangePct < maxDecline) {
+      return {
+        pass: false,
+        reason: `Pool fees declining ${feeChangePct}% (max allowed ${maxDecline}%). Possible honeypot or temporary spike.`,
+      };
+    }
+
+    // Layer 2: Fee Spike — cross-timeframe comparison
+    if (config.screening.feeSpikeCheck) {
+      const shortTf = config.screening.feeSpikeShortTimeframe || "1h";
+      const longTf = config.screening.feeSpikeLongTimeframe || "24h";
+      const maxRatio = numberOrNull(config.screening.feeSpikeMaxRatio) ?? 3.0;
+      const minShortFeeTvl = numberOrNull(config.screening.feeSpikeMinShortFeeTvl) ?? 0.5;
+
+      // Only check if short-term fee/TVL is significant enough
+      if (feeActiveTvlRatio != null && feeActiveTvlRatio >= minShortFeeTvl) {
+        try {
+          const longDetail = await fetchFreshPoolDetail(args.pool_address, longTf);
+          const longFeeTvl = numberOrNull(longDetail?.fee_active_tvl_ratio);
+
+          if (longFeeTvl != null && longFeeTvl > 0) {
+            const ratio = feeActiveTvlRatio / longFeeTvl;
+            if (ratio > maxRatio) {
+              return {
+                pass: false,
+                reason: `Fee spike detected: ${shortTf} fee/TVL ${feeActiveTvlRatio.toFixed(2)}% is ${ratio.toFixed(1)}x ${longTf} fee/TVL ${longFeeTvl.toFixed(2)}% (max ${maxRatio}x). Likely temporary fee spike.`,
+              };
+            }
+          }
+          // Fail-open: if long-timeframe data unavailable, skip Layer 2
+        } catch (error) {
+          log("executor", `Fee drift Layer 2 check skipped (API error): ${error.message}`);
+        }
+      }
+    }
+  }
+
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
   let volatilityDetail = detail;
   if ((config.screening.timeframe || "5m") !== volatilityTimeframe) {
@@ -330,6 +372,16 @@ const toolMap = {
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
       athFilterPct:     ["screening", "athFilterPct"],
+      feeDriftCheck:        ["screening", "feeDriftCheck"],
+      maxFeeDeclinePct:     ["screening", "maxFeeDeclinePct"],
+      feeSpikeCheck:        ["screening", "feeSpikeCheck"],
+      feeSpikeShortTimeframe: ["screening", "feeSpikeShortTimeframe"],
+      feeSpikeLongTimeframe:  ["screening", "feeSpikeLongTimeframe"],
+      feeSpikeMaxRatio:     ["screening", "feeSpikeMaxRatio"],
+      feeSpikeMinShortFeeTvl: ["screening", "feeSpikeMinShortFeeTvl"],
+      timeOfDayCheck:         ["screening", "timeOfDayCheck"],
+      riskyHours:             ["screening", "riskyHours"],
+      minTokenAgeForTimeCheck: ["screening", "minTokenAgeForTimeCheck"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
@@ -446,6 +498,9 @@ const toolMap = {
       gmgnMinRsi: ["gmgn", "indicatorRules", "minRsi"],
       gmgnMaxRsi: ["gmgn", "indicatorRules", "maxRsi"],
       gmgnRequireBbPosition: ["gmgn", "indicatorRules", "requireBbPosition"],
+      gmgnMaxRugRatio: ["gmgn", "maxRugRatio"],
+      gmgnRejectSingleVolumeSpike: ["gmgn", "rejectSingleVolumeSpike"],
+      gmgnMaxSingleCandleVolumeShare: ["gmgn", "maxSingleCandleVolumeShare"],
       // chart indicators
       chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
       indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],

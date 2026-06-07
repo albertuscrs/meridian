@@ -356,3 +356,109 @@ Previously only Meteora pipeline had this filter.
 ### Screening Cooldown (`index.js`)
 Management cycle respects `screeningIntervalMin` when triggering screening on no-position.
 No longer spams screening every 3 minutes when no positions open.
+
+---
+
+## Session Notes (2026-05-23 to 2026-05-29)
+
+### What Was Done
+
+**Fee Drift Detection (Tier 2)**
+- Layer 1: `fee_change_pct` filter in screening + deploy (zero API cost)
+- Layer 2: Cross-timeframe fee/TVL spike check (1h vs 24h) at deploy time
+- 7 config keys: `feeDriftCheck`, `maxFeeDeclinePct`, `feeSpikeCheck`, `feeSpikeShortTimeframe`, `feeSpikeLongTimeframe`, `feeSpikeMaxRatio`, `feeSpikeMinShortFeeTvl`
+
+**Config Tuning (Tier 3)**
+- `stopLossCooldownHours`: 2 → 6 (prevent fast re-deploy into SL'd pools)
+- `minVolatility`: null → 3.5 (reduce pump-frequency pools)
+
+**Base-mint Blacklist on Catastrophic SL (Tier 4)**
+- `pool-cooldown.js`: if SL + `pnlPct ≤ -10%` → `addToBlacklist()` permanent
+- Uses same threshold as `emergencyClosePct`
+
+**Time-of-Day Awareness (Tier 5)**
+- Young tokens (<24h) blocked during risky UTC windows (00-04, 16-17)
+- Config: `timeOfDayCheck`, `riskyHours`, `minTokenAgeForTimeCheck`
+
+**PnL Poll Gap Fix (Critical)**
+- Bug: `queuePeakConfirmation()` peak gate blocked Rule 0 evaluation when PnL descending
+- Embrace case: +0.59% → -36% undetected for 25 minutes
+- Fix: Emergency floor check BEFORE peak gate in `state.js`
+- Throttled diagnostic log (5 min/position) for forensic trail
+
+**Performance Dashboard**
+- `/performance` command: 24h/7d/30d/all-time stats
+- Shows: win rate, PnL, fees, best/worst pools, close reason breakdown
+
+**Log Rotation**
+- `rotateOldLogs()` at startup, 7-day retention (`LOG_RETENTION_DAYS`)
+- Cleans `agent-*.log`, `actions-*.jsonl`, `snapshots-*.jsonl`
+
+**GMGN Settings Reorganization**
+- GMGN page: volume/size filters (mcap, volume, holders)
+- Safety page: 10 anti-scam filters (bundler, rat trader, fresh wallet, dev hold, rug ratio, sniper, etc.)
+- Indicators page: GMGN indicator filter, BB position toggle, RSI/Supertrend settings
+- 3 new CONFIG_MAP entries: `gmgnMaxRugRatio`, `gmgnRejectSingleVolumeSpike`, `gmgnMaxSingleCandleVolumeShare`
+
+**Jupiter API Fix**
+- `quote-api.jup.ag` DNS dead → switched to `api.jup.ag/price/v3`
+- Removed hardcoded API key from `wallet.js` → reads from `.env` via config
+- Health check now sends `x-api-key` header
+
+**Upstream Merge**
+- 3 commits: auto-register Telegram commands, DeepSeek thinking mode fix, false volume=0 screening fix
+
+### What to Avoid
+
+1. **Never use `numberOrNull` in `screening.js`** — that function only exists in `executor.js`. Use `numeric()` which is already defined in `screening.js`.
+
+2. **Never hardcode API keys in source code** — always read from `.env` via `config.js`. The `.env` file uses `envcrypt.js` for encryption. Keys go in `.env` with `# encrypted` marker.
+
+3. **Never import `config` in `state.js`** — `state.js` doesn't import config. Pass config values via `options` parameter to functions.
+
+4. **Never add duplicate `const` declarations** — upstream merge added duplicate `BOT_COMMANDS` in `telegram.js` which caused `SyntaxError: Identifier has already been declared`. Always check for existing declarations before merging.
+
+5. **Never forget `htmlEscape()` for Telegram HTML** — pool names and close reasons can contain `<`, `>`, `=` which break Telegram's HTML parser. Always escape dynamic content.
+
+6. **Never use `settingValue()` without adding mapping** — when adding new config keys to `/settings` UI, you MUST also add the key→config mapping in `settingValue()` function, otherwise it shows "off".
+
+7. **Don't restart bot during active cycles** — check logs for `Starting management cycle` or `Starting screening cycle` before restarting. Wait for cycle to finish.
+
+### What Worked Well
+
+1. **Regression tests caught bugs early** — 176 tests covering R-implementations, fee drift, time-of-day, PnL poll gap, GMGN settings, Jupiter API. Run `node test/regression-test.js` after every change.
+
+2. **Two-layer fee drift detection** — Layer 1 (fee_change_pct) is free, Layer 2 (cross-timeframe) adds 1 API call only at deploy time. Fail-open design prevents false rejections.
+
+3. **Surgical PnL poll gap fix** — Adding emergency check BEFORE peak gate (not rewriting peak logic) preserved trailing TP behavior while fixing catastrophic loss detection.
+
+4. **`settingValue()` pattern for Telegram UI** — Centralized config→UI mapping makes it easy to add new settings. Just add key to `settingValue()` and create button.
+
+5. **CONFIG_MAP pattern for executor** — All config keys mapped in one place. Easy to verify coverage by grepping gmgn-config.json keys against CONFIG_MAP.
+
+6. **`numeric()` vs `numberOrNull()`** — Different files use different helpers. `screening.js` uses `numeric()`, `executor.js` uses `numberOrNull()`. Don't mix them.
+
+---
+
+## Regression Tests (Updated)
+
+`test/regression-test.js` — 176 inline unit tests.
+Run: `node test/regression-test.js`
+
+| Test group | Cases | What it covers |
+|------------|-------|----------------|
+| R1 Stop Loss | 4 | threshold boundary, suspicious pnl bypass |
+| R2/R4.1 Trailing TP | 4 | always queued, not instant-close |
+| R7 Safety-Lock | 7 | pecut+experimental, above+below, pnl=0 edge |
+| R8 Indicator-Aware | 6 | hold/close/fail-open/profile guard/trailing bypass |
+| R5 Low Yield | 4 | age gate, custom minAgeBeforeYieldCheck |
+| F1 signal-tracker | 7 | pool lookup, base_mint fallback, clear-after-retrieval |
+| Fee Drift | 31 | Layer 1 decline, Layer 2 spike, config, executor, screening |
+| Config Tuning | 4 | minVolatility, stopLossCooldownHours defaults |
+| Catastrophic SL | 7 | blacklist logic, threshold alignment |
+| Time-of-Day | 18 | risky windows, safe windows, age threshold, config |
+| Log Rotation | 6 | rotateOldLogs function, startup call |
+| Performance | 7 | /performance command, getPerformanceHistory |
+| PnL Poll Gap | 14 | emergency before peak gate, diagnostic log |
+| GMGN Settings | 39 | CONFIG_MAP, Safety page, Volume page, Indicators |
+| Jupiter API | 14 | health check, API key, URL constants |

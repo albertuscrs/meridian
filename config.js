@@ -94,7 +94,7 @@ export const config = {
     maxMcap:           u.maxMcap           ?? 10_000_000,
     minBinStep:        u.minBinStep        ?? 80,
     maxBinStep:        u.maxBinStep        ?? 125,
-    minVolatility:     u.minVolatility     ?? null, // null = no minimum
+    minVolatility:     u.minVolatility     ?? 3.5, // minimum volatility to consider
     maxVolatility:     u.maxVolatility     ?? 5,
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
@@ -111,6 +111,18 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    // Fee Drift Detection
+    feeDriftCheck:        u.feeDriftCheck        ?? true,  // master toggle for fee drift
+    maxFeeDeclinePct:     u.maxFeeDeclinePct     ?? -50,   // Layer 1: reject if fee_change_pct below this
+    feeSpikeCheck:        u.feeSpikeCheck        ?? true,  // Layer 2: cross-timeframe spike check
+    feeSpikeShortTimeframe: u.feeSpikeShortTimeframe ?? "1h",  // Layer 2: short timeframe
+    feeSpikeLongTimeframe:  u.feeSpikeLongTimeframe  ?? "24h", // Layer 2: long timeframe (baseline)
+    feeSpikeMaxRatio:     u.feeSpikeMaxRatio     ?? 3.0,   // Layer 2: max short/long fee/TVL ratio
+    feeSpikeMinShortFeeTvl: u.feeSpikeMinShortFeeTvl ?? 0.5, // Layer 2: skip check if short fee/TVL < this
+    // Time-of-Day Awareness
+    timeOfDayCheck:         u.timeOfDayCheck         ?? true,     // master toggle
+    riskyHours:             u.riskyHours             ?? [0,1,2,3,4,16,17], // UTC hours with high SL rate
+    minTokenAgeForTimeCheck: u.minTokenAgeForTimeCheck ?? 24,     // only block young tokens (< this age in hours)
   },
 
   gmgn: {
@@ -178,7 +190,7 @@ export const config = {
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     lowYieldCooldownHours:  u.lowYieldCooldownHours  ?? 4,
-    stopLossCooldownHours:  u.stopLossCooldownHours  ?? 2,
+    stopLossCooldownHours:  u.stopLossCooldownHours  ?? 6,
     lossGt1PctCooldownHours: u.lossGt1PctCooldownHours ?? 1,
     oorBigLossCooldownHours: u.oorBigLossCooldownHours ?? 6,
     oorBigLossPnlThreshold: u.oorBigLossPnlThreshold ?? -2,

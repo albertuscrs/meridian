@@ -18,6 +18,8 @@ This is a **personal fork** of an open-source DLMM LP agent (Meridian).
 ### Git History (Recent)
 
 ```
+cb97f05 merge: integrate upstream experimental (3 commits)
+8eb279e docs: update handover and CLAUDE.md with all completed work
 1bb2edc feat: emergency exit at -10% bypassing cooldown
 2837752 merge: integrate upstream relay enrichment refactor
 016f239 Move relay position enrichment into bot (upstream)
@@ -605,6 +607,27 @@ Format: `**YYYY-MM-DD** — Brief description (commit hash)`
 - **2026-05-18** — Stop Loss deep-dive analysis (23 SL since May 1); catastrophic outlier identification
 - **2026-05-18** — Emergency exit at -10% implemented (commit `1bb2edc`): Rule 0 in state.js, cooldown bypass in PnL poll, /settings UI button, CONFIG_MAP entry
 - **2026-05-18** — Screening cooldown fix: when no positions, management cycle respects `screeningIntervalMin` instead of triggering every 3 minutes
+- **2026-05-18** — Jupiter health check fix: `quote-api.jup.ag` hostname deprecated (DNS dead), switched to `api.jup.ag/price/v3` with `x-api-key` header from config; removed hardcoded API key from wallet.js (now reads from .env via config); regression test suite expanded to 49 cases; Fee Drift Detection plan documented
+- **2026-05-23** — Fee Drift Detection implemented: Layer 1 (fee_change_pct decline) in screening + deploy, Layer 2 (cross-timeframe spike 1h vs 24h) in deploy validation; 7 config keys, 80 regression tests total
+- **2026-05-23** — Config tuning: stopLossCooldownHours 2→6, minVolatility 3→3.5 (updated in config.js + user-config.json); Base-mint blacklist on catastrophic SL (pnlPct ≤ -10%) added to pool-cooldown.js; 91 regression tests total
+- **2026-05-23** — Time-of-Day awareness: young tokens (<24h) blocked during risky UTC windows (00-04, 16-17); 3 config keys, 109 regression tests total
+- **2026-05-23** — Performance Dashboard (`/performance` 24h/7d/30d/all); Log Rotation (7-day retention, 68 old files cleaned); R8 presets documented; 123 regression tests total
+- **2026-05-24** — Upstream merge (3 commits: auto-register Telegram commands, DeepSeek thinking mode fix, false volume=0 screening fix); fixed `numberOrNull` bug in screening.js; `hiveMindPullMode: "auto"` confirmed in user-config.json
+- **2026-05-28** — PnL Poll Gap fix: emergency floor check added BEFORE peak gate in `queuePeakConfirmation()` (state.js); prevents positions from bleeding -10%+ without detection (Embrace case); throttled diagnostic log (5 min/position); 137 regression tests total
+- **2026-05-29** — GMGN Settings reorganized: Volume page (mcap, volume, holders), Safety page (10 anti-scam filters), Indicators page (GMGN indicator filter + BB position toggle); 3 new CONFIG_MAP entries (maxRugRatio, rejectSingleVolumeSpike, maxSingleCandleVolumeShare); 176 regression tests total
+- **2026-05-30** — PnL Poll Gap fix follow-up: `state.js` doesn't import `config` — changed to pass `emergencyClosePct` and `closeProfile` via `options` parameter to `queuePeakConfirmation()`; `index.js` call site updated; 176 regression tests still pass
+- **2026-06-03** — GMGN Settings `settingValue()` mapping fix: added 15 missing keys (gmgnMinMcap, gmgnMaxMcap, gmgnAthFilterPct, gmgnHoldersLimit, gmgnMaxTop10HolderRate, gmgnMaxRatTraderRate, gmgnMaxFreshWalletRate, gmgnMaxDevTeamHoldRate, gmgnMaxBotDegenRate, gmgnMaxRugRatio, gmgnMaxSniperCount, gmgnMaxSniperHoldRate, gmgnMinSmartDegenCount, gmgnRequireBbPosition); Telegram `/settings` now shows actual values from gmgn-config.json instead of "off"
+- **2026-06-03** — Jupiter health check fix: `quote-api.jup.ag` DNS dead → switched to `api.jup.ag/price/v3` with `x-api-key` header from config; removed hardcoded API key from wallet.js (now reads from .env via config); screeningModel changed from mimo-v2.5 to MiniMax-M2.7; 15 state.json backup files deleted
+- **2026-06-03** — CLAUDE.md updated with "What was done / What to avoid / What worked well" session notes section
+- **2026-06-08** — Upstream merge SKIPPED: 2 new upstream commits (1e053a2 drop 15m timeframe + 5fae0c5 massive refactor: entry/exit learning, HiveMind market push, OKX removal). 5fae0c5 conflicts with local R-implementations in 5 files (index.js, lessons.js, telegram.js, tools/dlmm.js, tools/executor.js). Resolving requires significant effort. Re-evaluate after local branch stabilizes.
+
+- **2026-06-08** — Upstream cherry-pick: 1e053a2 (drop 15m timeframe) applied. Conflicts in prompt.js (kept upstream 30m instead of 15m). New file screening-scales.js added. Other 3 files (definitions.js, executor.js, screening.js) auto-merged. 5fae0c5 still skipped (too large). 176/176 regression tests pass, bot restarted.
+
+### Diverged Commits
+
+- **experimental ahead:** 21 commits (all local features — Fee Drift, Catastrophic SL blacklist, Time-of-Day, PnL Poll Gap, GMGN Settings, Jupiter fix, etc.)
+- **upstream/experimental ahead:** 2 commits (1e053a2 + 5fae0c5)
+- **Local branch has 23-commit lead on upstream** but upstream has 2 large new features not yet integrated
 
 ---
 
@@ -755,30 +778,308 @@ SEBELUM: PnL poll → SL at -5% → cooldown 180s → management cycle → LLM 3
 SESUDAH: PnL poll → Emergency at -10% → cooldown DISKIP → management cycle → hard exit → close (70s total, ~-11% to -13%)
 ```
 
-### Tier 2: Fee Drift Detection
+### Tier 2: Fee Drift Detection ✅ DONE (2026-05-23)
 
 **Impact:** HIGH — prevents deploying into temporary fee spikes  
-**Effort:** ~30 lines in `tools/screening.js` or `executor.js`
+**Effort:** ~80 lines across 4 files
 
-Compare fee/TVL across two timeframes before deploy:
+#### Design: Two-Layer Detection
+
+**Layer 1: Fee Decline (screening + deploy, zero extra API cost)**
+- The API already returns `fee_change_pct` (period-over-period fee change %)
+- This field was extracted at `tools/screening.js:848` but **never used**
+- If `fee_change_pct < maxFeeDeclinePct` (default -50) → reject: fees are actively crashing
+
+**Layer 2: Fee Spike / Honeypot (deploy validation only, 1 extra API call)**
+- Fetch pool detail for short timeframe (default "1h") and long timeframe (default "24h")
+- Compare: `short_fee_tvl / long_fee_tvl`
+- If ratio > `maxFeeDriftRatio` (default 3.0) AND short_fee_tvl > `feeSpikeMinShortFeeTvl` (default 0.5) → reject as "fee spike"
+- Only runs at deploy validation time (not screening) to minimize API overhead
+
+#### Config Keys (`config.js` screening section)
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `feeDriftCheck` | `true` | Master toggle |
+| `maxFeeDeclinePct` | `-50` | Layer 1: reject if fee_change_pct below this |
+| `feeSpikeCheck` | `true` | Layer 2 toggle |
+| `feeSpikeShortTimeframe` | `"1h"` | Short timeframe for spike check |
+| `feeSpikeLongTimeframe` | `"24h"` | Long timeframe (baseline) |
+| `feeSpikeMaxRatio` | `3.0` | Max allowed short/long fee/TVL ratio |
+| `feeSpikeMinShortFeeTvl` | `0.5` | Skip check if short fee/TVL < 0.5% |
+
+#### Files Modified
+
+| File | Changes |
+|------|---------|
+| `config.js` | Added 7 config keys to `screening` section |
+| `tools/screening.js` | Layer 1: `fee_change_pct` filter in `getTopCandidates()` |
+| `tools/executor.js` | Layer 1+2 checks in `validateDeployPoolThresholds()`. CONFIG_MAP entries for 7 keys |
+| `tools/definitions.js` | Updated `update_config` description with new keys |
+| `test/regression-test.js` | 31 fee drift tests added (80 total) |
+
+#### Flow
 ```
-fee_tvl_1h vs fee_tvl_24h
-If fee_tvl_1h > 3x fee_tvl_24h → flag as "fee spike", skip deploy
+Screening (getTopCandidates):
+  For each candidate:
+    → existing filters (TVL, volatility, cooldown, etc.)
+    → [NEW] Layer 1: fee_change_pct < maxFeeDeclinePct? → REJECT "fees declining X%"
+    → present to LLM
+
+Deploy validation (validateDeployPoolThresholds):
+  → existing fee/TVL check against minFeeActiveTvlRatio
+  → [NEW] Layer 1: re-check fee_change_pct from fresh pool detail → REJECT
+  → [NEW] Layer 2: fetch long-timeframe fee/TVL → ratio check → REJECT if spike
+  → proceed with deploy
 ```
+
+#### Edge Cases
+- Fail-open on Layer 2: if long-timeframe API call fails, skip (don't block deploy)
+- Very new tokens (<24h) may have `null` long-timeframe fee/TVL → skip Layer 2
+- `feeSpikeMinShortFeeTvl` prevents false positives on tiny-fee pools
 
 Rationale: SL positions had higher fee/TVL (1.60 median) than non-SL (0.89). High fee/TVL that doesn't sustain across longer timeframes is a honeypot signal. Currently 76% of positions die young (43% pumped out + 33% low yield) — fee drift detection catches the root cause.
 
-### Tier 3: Config Tuning
+### Tier 3: Config Tuning ✅ DONE (2026-05-23)
 
 | Change | From | To | Rationale |
 |--------|------|----|-----------|
 | `stopLossCooldownHours` | 2 | 6 | Prevent fast re-deploy into pools that just SL'd |
-| `minVolatility` | 3 | 3.5-4 | Reduce pump-frequency pools (43% Rule 3 closes) |
+| `minVolatility` | 3 | 3.5 | Reduce pump-frequency pools (43% Rule 3 closes) |
 
-### Tier 4: Base-mint Blacklist After Catastrophic SL
+Updated in both `config.js` (defaults) and `user-config.json` (runtime values).
 
-If a base_mint ever hits SL with PnL < -10%, block all pools with that base_mint for 48 hours. RoyalPop-SOL (base_mint `8TbnsLM...`) hit -30.72% and was re-deployed 2 days later — hitting SL again at -5.07%.
+### Tier 4: Base-mint Blacklist After Catastrophic SL ✅ DONE (2026-05-23)
 
-### Tier 5: Screening Time-of-Day Awareness
+If a base_mint ever hits SL with PnL ≤ -10% (same as `emergencyClosePct`), the token is permanently blacklisted via `token-blacklist.js`. Screening filters blacklisted tokens before passing pools to the LLM.
+
+**Implementation:** `pool-cooldown.js` Scenario 2 (Stop Loss) now calls `addToBlacklist()` when `pnlPct <= emergencyClosePct`. Uses same threshold as Rule 0 Emergency Close.
+
+**Unblacklist:** Via Telegram `/blacklist remove <mint>` or `remove_from_blacklist` tool.
+
+### Tier 5: Screening Time-of-Day Awareness ✅ DONE (2026-05-23)
 
 Skip deploy if token age < 24 hours AND current hour is in high-risk window (00-04 UTC or 16-17 UTC). Zero SL during 05-09 UTC suggests pool quality varies significantly by time of day.
+
+**Config keys:** `timeOfDayCheck` (default true), `riskyHours` (default [0,1,2,3,4,16,17]), `minTokenAgeForTimeCheck` (default 24h)
+
+**Files:** `config.js`, `tools/screening.js` (filter in `getTopCandidates()`), `tools/executor.js` (CONFIG_MAP), `tools/definitions.js`
+
+### S1: Aggregate Performance Dashboard ✅ DONE (2026-05-23)
+
+**Command:** `/performance` (24h default), `/performance 7d`, `/performance 30d`, `/performance all`
+
+**Shows:**
+- Period stats: positions, win rate, total PnL, avg PnL, fees earned
+- All-time stats: total positions, win rate, PnL, range efficiency
+- Best/worst pools by PnL
+- Close reason breakdown with PnL per reason
+
+**Files:** `index.js` (command handler), `lessons.js` (getPerformanceHistory already existed)
+
+### M3: Log Rotation ✅ DONE (2026-05-23)
+
+**Implementation:** `rotateOldLogs()` in `logger.js` — deletes log files older than 7 days. Runs at startup. Cleans `agent-*.log`, `actions-*.jsonl`, `snapshots-*.jsonl`.
+
+**Config:** `LOG_RETENTION_DAYS` env var (default 7)
+
+**Result:** First run cleaned up 68 old log files.
+
+### R8 Exit Preset Tuning ✅ DOCUMENTED (2026-05-23)
+
+Available presets in `tools/chart-indicators.js`:
+- `supertrend_break` (current default) — Supertrend flip confirmation
+- `rsi_reversal` — RSI overbought/oversold
+- `bollinger_reversion` — BB band touch
+- `rsi_plus_supertrend` — RSI + Supertrend combined
+- `supertrend_or_rsi` — either signal confirms
+- `bb_plus_rsi` — BB + RSI combined
+
+Switch via `/settings` → R8 Exit Preset button.
+
+---
+
+## 🚨 PNL POLL GAP DISCOVERY (CRITICAL — Implementation Pending)
+
+**Date discovered:** 2026-05-28
+**Severity:** HIGH — affects all positions, root cause of Embrace -36% catastrophe
+**Investigation source:** Embrace/SOL post-mortem (2026-05-20 catastrophic close)
+
+### The Discovery
+
+Found **logic gap in PnL polling**: `updatePeakPnl()` in `state.js` line 229-232 early-returns
+when `candidatePnlPct <= currentPeak`. This means:
+
+- ✅ PnL going UP → peak updates, log fires, **exit rules evaluated implicitly via management cycle**
+- ❌ PnL going DOWN → function exits early, **exit rules NEVER evaluated by poll path**
+- ⚠️ Result: Rule 0 (Emergency Close at -10%) only fires when **OOR transition** triggers a separate code path
+
+### Evidence — Embrace/SOL Catastrophe (2026-05-20)
+
+```
+18:01:56  DEPLOY at active_bin=-585
+18:51:03  peak PnL 0.50%
+19:07:18  peak PnL 0.59%  ← LAST LOG
+          [25-MINUTE BLACKOUT]
+          (PnL polling continued but every reading was ≤ 0.59%,
+           so early-return triggered every cycle — Rule 0 never evaluated)
+19:32:50  Position marked OUT OF RANGE (active_bin crossed -643)
+19:32:50  Emergency close fired at PnL -25.35%  ← Triggered by OOR path, not poll
+19:32:59  Close confirmed on chain
+19:33:07  Final realized: -36.05% (after slippage)
+```
+
+**Designer assumption (HANDOVER 18 May):** Rule 0 closes positions at ~-11% to -13% realized.
+**Reality:** Rule 0 fires only on OOR transition. Position can lose much more if it
+stays in-range while bleeding (IL accumulation traversing lower bins).
+
+### Verified Behavior
+
+**Code path verified** (state.js):
+```javascript
+// Line 229-232 — THE GATE
+const currentPeak = pos.peak_pnl_pct ?? 0;
+if (candidatePnlPct <= currentPeak) return false;  // ← EARLY RETURN BLOCKS EXIT EVAL
+```
+
+**Log evidence verified:**
+- Position 5GDk5cs (Embrace catastrophic): 25 min log gap during PnL descent
+- Position 7Cuntu (Embrace healthy): continuous logs because PnL trending UP
+
+### Why Rule 0 Eventually Fired (For Reference)
+
+Rule 0 evaluation runs through **two code paths**:
+1. **Management cycle** (every 3 minutes) — full exit rule check
+2. **PnL poll** (every 30 seconds) — gated by peak update logic
+
+For Embrace, Rule 0 fired via **OOR transition handler** which has separate code path
+unaffected by the peak gate. Without OOR cross, the position would have continued
+bleeding indefinitely until next management cycle catch.
+
+### Fix Plan (NOT YET IMPLEMENTED)
+
+**Strategy:** Add emergency check **before** peak gate in PnL poll path.
+Minimal surgical change, no regression risk to trailing TP logic.
+
+**Files to modify:**
+- `state.js` — `updatePeakPnl()` or equivalent function — add emergency bypass
+- Possibly `index.js` PnL poll handler if check belongs there
+
+**Implementation outline:**
+```javascript
+// Pseudo — actual location TBD based on call graph
+function updatePeakPnl(positionData) {
+  const pos = state.positions[positionData.address];
+  if (!pos || pos.closed) return false;
+
+  const currentPnlPct = positionData.current_pnl_pct;
+
+  // NEW: Emergency floor check — ALWAYS evaluated, independent of peak gate
+  if (currentPnlPct != null
+      && config.management.emergencyClosePct != null
+      && currentPnlPct <= config.management.emergencyClosePct) {
+    log("state", `[PnL poll] Emergency floor breached: ${pos.position_address} PnL ${currentPnlPct.toFixed(2)}% — flagging for immediate close`);
+    pos.emergency_flag = true;       // signal to next management cycle / poll handler
+    save(state);
+    return { emergency: true, action: "EMERGENCY_CLOSE", reason: `... <= ${config.management.emergencyClosePct}%` };
+  }
+
+  // EXISTING: Peak gate logic (unchanged)
+  const currentPeak = pos.peak_pnl_pct ?? 0;
+  if (candidatePnlPct <= currentPeak) return false;
+  // ... rest unchanged
+}
+```
+
+**Call-site handling:** PnL poll handler in `index.js` (line 936-985) needs to check
+for `{ emergency: true }` return and trigger close immediately, same path as
+existing emergency handling (lines 957).
+
+### Verification After Fix
+
+Add **PnL state observability** — log every Nth poll regardless of peak status:
+```javascript
+// Throttled diagnostic log — every 5 minutes if no other state change
+if (Date.now() - (pos.last_diag_log_at || 0) > 5 * 60 * 1000) {
+  log("state", `[PnL poll diag] ${pos.position_address} pnl=${currentPnlPct?.toFixed(2)}% peak=${pos.peak_pnl_pct?.toFixed(2)}% in_range=${!pos.out_of_range_since}`);
+  pos.last_diag_log_at = Date.now();
+}
+```
+
+This gives forensic trail of next time something weird happens.
+
+### Test Cases (Inline Predicate)
+
+```javascript
+// Test 1: PnL drops from peak, no OOR transition, emergency floor breached
+// Setup: pos.peak_pnl_pct = 0.59, currentPnlPct = -12, emergencyClosePct = -10
+// BEFORE FIX: function returns false (peak gate), Rule 0 not evaluated
+// AFTER FIX: function returns { emergency: true }, triggers close
+
+// Test 2: PnL drops from peak, emergency floor NOT breached
+// Setup: pos.peak_pnl_pct = 0.59, currentPnlPct = -5, emergencyClosePct = -10
+// Expected: returns false (peak gate engages as before, no spurious emergency)
+
+// Test 3: PnL rising to new peak, emergency irrelevant
+// Setup: pos.peak_pnl_pct = 0.59, currentPnlPct = 1.2
+// Expected: peak updates, no emergency triggered
+
+// Test 4: emergencyClosePct = null (disabled)
+// Setup: currentPnlPct = -15, emergencyClosePct = null
+// Expected: emergency block skipped, falls through to existing logic (no regression)
+
+// Test 5: currentPnlPct = null
+// Expected: emergency block skipped (null guard), no false trigger
+```
+
+### Bonus Finding: Pool Selection Ignored Warnings
+
+Pre-deploy, bot saw **4+ hours of bearish signals** for Embrace:
+- 14:21 vol=2.71 (filtered low-vol)
+- 15-17h: "Embrace: bearish supertrend, price below supertrend" (multiple)
+- 17:51 vol=2.07 (still dying)
+- 17:56 vol=2.88
+- 18:01 vol=3.32 (briefly crossed threshold → bot deployed)
+
+Bot **deployed into clearly degrading pool** because vol briefly crossed threshold.
+Future enhancement: track multi-cycle signal trend, block deploy if recent bearish.
+
+But out of scope for this fix — separate concern.
+
+### Severity Justification
+
+This gap affects **all positions** post-implementation of Rule 0 (May 18). Any
+position that crashes while in-range will not trigger Rule 0 via PnL poll until
+OOR transition. Slippage between actual breach and OOR-triggered close can be
+significant (Embrace case: -10% → -36% = -26 percentage points lost).
+
+**Estimated impact:** Reviewing 522-position dataset, post-Rule-0 catastrophic
+losses likely all share this pattern. Fix should reduce future similar events.
+
+### Implementation Priority
+
+This is **higher priority than R8 verification**. R8 verification waits for
+position drain (passive monitoring). PnL Poll Gap fix is **active code change**
+that prevents catastrophic loss recurrence.
+
+Recommended order:
+1. Fix PnL Poll Gap (this section)
+2. Verify fix via test simulation
+3. Deploy fix when positions drain
+4. Then proceed with R8 verification
+
+### Forensic Backup
+
+Preserved logs for future reference:
+```
+~/log-backups/embrace-catastrophe/
+  agent-2026-05-20.log
+  agent-2026-05-21.log
+  actions-2026-05-20.jsonl
+```
+
+### Session Continuity Log Addition
+
+- **2026-05-28** — Embrace/SOL post-mortem revealed PnL Poll Gap (peak-gate
+  skips exit rule evaluation when PnL descending). Fix plan designed,
+  implementation pending. Priority: HIGH.

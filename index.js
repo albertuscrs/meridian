@@ -5,13 +5,13 @@ import { createReadStream } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
-import { log } from "./logger.js";
+import { log, rotateOldLogs } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary, listLessons } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getPerformanceHistory, listLessons } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -57,6 +57,7 @@ const isMain = entrypointPath
 
 if (isMain) {
   log("startup", "DLMM LP Agent starting...");
+  rotateOldLogs();
   log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
   log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
   ensureAgentId();
@@ -942,9 +943,21 @@ Summarize the current portfolio health, total fees earned, and performance of al
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
       for (const p of result.positions) {
+        // Peak confirmation + emergency floor check
+        const peakResult = queuePeakConfirmation(p.position, p.pnl_pct, {
+          immediate: !shouldUsePnlRecheck(),
+          emergencyClosePct: config.management.emergencyClosePct,
+          closeProfile: config.management.closeProfile,
+        });
+        if (peakResult?.emergency) {
+          _pollTriggeredAt = 0; // bypass cooldown — close immediately
+          log("state", `[PnL poll] Emergency close: ${p.pair} — ${peakResult.reason}`);
+          runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Emergency management failed: ${e.message}`));
+          continue;
+        }
         if (
           !p.pnl_pct_suspicious &&
-          queuePeakConfirmation(p.position, p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
+          peakResult === true &&
           shouldUsePnlRecheck()
         ) {
           schedulePeakConfirmation(p.position);
@@ -1293,6 +1306,20 @@ function settingValue(key) {
     gmgnMinKolCount: config.gmgn.minKolCount,
     gmgnMinTotalFeeSol: config.gmgn.minTotalFeeSol,
     gmgnMinHolders: config.gmgn.minHolders,
+    gmgnMinMcap: config.gmgn.minMcap,
+    gmgnMaxMcap: config.gmgn.maxMcap,
+    gmgnAthFilterPct: config.gmgn.athFilterPct,
+    gmgnHoldersLimit: config.gmgn.holdersLimit,
+    gmgnMaxTop10HolderRate: config.gmgn.maxTop10HolderRate,
+    gmgnMaxRatTraderRate: config.gmgn.maxRatTraderRate,
+    gmgnMaxFreshWalletRate: config.gmgn.maxFreshWalletRate,
+    gmgnMaxDevTeamHoldRate: config.gmgn.maxDevTeamHoldRate,
+    gmgnMaxBotDegenRate: config.gmgn.maxBotDegenRate,
+    gmgnMaxRugRatio: config.gmgn.maxRugRatio,
+    gmgnMaxSniperCount: config.gmgn.maxSniperCount,
+    gmgnMaxSniperHoldRate: config.gmgn.maxSniperHoldRate,
+    gmgnMinSmartDegenCount: config.gmgn.minSmartDegenCount,
+    gmgnRequireBbPosition: config.gmgn.indicatorRules?.requireBbPosition,
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
     maxBinsBelow: config.strategy.maxBinsBelow,
@@ -1377,8 +1404,9 @@ function renderSettingsMenu(page = "main") {
     ],
     [
       settingButton("Screen", "cfg:page:screen"),
-      settingButton("Indicators", "cfg:page:indicators"),
       settingButton("GMGN", "cfg:page:gmgn"),
+      settingButton("Safety", "cfg:page:safety"),
+      settingButton("Indicators", "cfg:page:indicators"),
       settingButton("KOL", "cfg:page:kol"),
     ],
   ];
@@ -1429,8 +1457,8 @@ function renderSettingsMenu(page = "main") {
   } else if (page === "screen") {
     rows = [
       [
-        settingButton("Source: Meteora", "cfg:set:screeningSource:meteora"),
-        settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
+        settingButton(`Source: Meteora${config.screening.source === "meteora" ? " ✓" : ""}`, "cfg:set:screeningSource:meteora"),
+        settingButton(`Source: GMGN${config.screening.source === "gmgn" ? " ✓" : ""}`, "cfg:set:screeningSource:gmgn"),
       ],
       [toggleButton("gmgnRequireKol", "GMGN require KOL")],
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
@@ -1463,18 +1491,23 @@ function renderSettingsMenu(page = "main") {
     ];
   } else if (page === "gmgn") {
     rows = [
-      [toggleButton("gmgnIndicatorFilter", "Indicator filter"), toggleButton("gmgnRequireKol", "Require KOL")],
       [
-        settingButton("TF: 5m", "cfg:set:gmgnIndicatorInterval:5_MINUTE"),
-        settingButton("TF: 15m", "cfg:set:gmgnIndicatorInterval:15_MINUTE"),
-        settingButton("TF: 1h", "cfg:set:gmgnIndicatorInterval:1h"),
+        inputButton("gmgnMinMcap", "Min mcap")[0],
+        inputButton("gmgnMaxMcap", "Max mcap")[0],
       ],
-      [toggleButton("gmgnRequireBullishSt", "Bullish ST"), toggleButton("gmgnRejectAtBottom", "Reject at bottom"), toggleButton("gmgnRequireAboveSt", "Above ST")],
-      inputButton("gmgnMinRsi", "Min RSI"),
-      inputButton("gmgnMaxRsi", "Max RSI"),
-      inputButton("gmgnMinKolCount", "Min KOL"),
-      inputButton("gmgnMinTotalFeeSol", "Min fee SOL"),
-      inputButton("gmgnMinHolders", "Min holders"),
+      [
+        inputButton("gmgnMinVolume", "Min volume")[0],
+        inputButton("gmgnMinHolders", "Min holders")[0],
+      ],
+      [
+        inputButton("gmgnAthFilterPct", "ATH filter %", { digits: 0 })[0],
+        inputButton("gmgnHoldersLimit", "Holders limit")[0],
+      ],
+      [
+        inputButton("gmgnMinTokenAgeHours", "Min token age (h)")[0],
+        inputButton("gmgnMaxTokenAgeHours", "Max token age (h)")[0],
+      ],
+      [settingButton("Safety filters", "cfg:page:safety")],
       [settingButton("KOL settings", "cfg:page:kol")],
     ];
   } else if (page === "kol") {
@@ -1484,9 +1517,36 @@ function renderSettingsMenu(page = "main") {
       inputButton("gmgnDumpKolNames", "Dump KOL (comma-sep)"),
       inputButton("gmgnDumpKolMinHoldPct", "Dump KOL min hold %"),
     ];
+  } else if (page === "safety") {
+    rows = [
+      [
+        inputButton("gmgnMaxTop10HolderRate", "Max top10 %", { digits: 2 })[0],
+        inputButton("gmgnMaxBundlerRate", "Max bundler %", { digits: 2 })[0],
+      ],
+      [
+        inputButton("gmgnMaxRatTraderRate", "Max rat trader %", { digits: 2 })[0],
+        inputButton("gmgnMaxFreshWalletRate", "Max fresh wallet %", { digits: 2 })[0],
+      ],
+      [
+        inputButton("gmgnMaxDevTeamHoldRate", "Max dev hold %", { digits: 2 })[0],
+        inputButton("gmgnMaxBotDegenRate", "Max bot degen %", { digits: 2 })[0],
+      ],
+      [
+        inputButton("gmgnMaxRugRatio", "Max rug ratio", { digits: 2 })[0],
+        inputButton("gmgnMaxSniperHoldRate", "Max sniper hold %", { digits: 2 })[0],
+      ],
+      [
+        inputButton("gmgnMaxSniperCount", "Max sniper count")[0],
+        inputButton("gmgnMinSmartDegenCount", "Min smart degen")[0],
+      ],
+      [toggleButton("gmgnRequireKol", "Require KOL")],
+      [inputButton("gmgnMinKolCount", "Min KOL")[0], inputButton("gmgnMinTotalFeeSol", "Min fee SOL")[0]],
+      [settingButton("Indicators", "cfg:page:indicators")],
+    ];
   } else if (page === "indicators") {
     rows = [
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("requireAllIntervals", "Require all TF")],
+      [toggleButton("gmgnIndicatorFilter", "GMGN indicator filter"), toggleButton("gmgnRequireBbPosition", "Require BB position")],
       [
         settingButton("TF: 5m", "cfg:set:indicatorIntervals:5_MINUTE"),
         settingButton("TF: 15m", "cfg:set:indicatorIntervals:15_MINUTE"),
@@ -1502,13 +1562,21 @@ function renderSettingsMenu(page = "main") {
         settingButton("Exit: RSI", "cfg:set:indicatorExitPreset:rsi_reversal"),
         settingButton("Exit: BB+RSI", "cfg:set:indicatorExitPreset:bb_plus_rsi"),
       ],
+      [
+        settingButton("GMGN ST", "cfg:set:gmgnIndicatorInterval:5_MINUTE"),
+        settingButton("GMGN 15m", "cfg:set:gmgnIndicatorInterval:15_MINUTE"),
+        settingButton("GMGN 1h", "cfg:set:gmgnIndicatorInterval:1h"),
+      ],
+      [toggleButton("gmgnRequireBullishSt", "Bullish ST"), toggleButton("gmgnRejectAtBottom", "Reject at bottom"), toggleButton("gmgnRequireAboveSt", "Above ST")],
+      inputButton("gmgnMinRsi", "Min RSI"),
+      inputButton("gmgnMaxRsi", "Max RSI"),
       inputButton("rsiLength", "RSI length"),
     ];
   } else {
     rows = [
       [
-        settingButton("Source: Meteora", "cfg:set:screeningSource:meteora"),
-        settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
+        settingButton(`Source: Meteora${config.screening.source === "meteora" ? " ✓" : ""}`, "cfg:set:screeningSource:meteora"),
+        settingButton(`Source: GMGN${config.screening.source === "gmgn" ? " ✓" : ""}`, "cfg:set:screeningSource:gmgn"),
       ],
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("trailingTakeProfit", "Trailing TP")],
@@ -1560,11 +1628,11 @@ async function applySettingsMenuCallback(msg) {
     const inputKey = parts[2];
     const currentVal = settingValue(inputKey);
     const inputPage = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(inputKey) ? "kol"
-      : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(inputKey) ? "screen"
-      : inputKey.startsWith("gmgn") && inputKey !== "gmgnRequireKol" ? "gmgn"
-      : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" ? "indicators"
+      : ["gmgnMaxTop10HolderRate", "gmgnMaxBundlerRate", "gmgnMaxRatTraderRate", "gmgnMaxFreshWalletRate", "gmgnMaxDevTeamHoldRate", "gmgnMaxBotDegenRate", "gmgnMaxRugRatio", "gmgnMaxSniperCount", "gmgnMaxSniperHoldRate", "gmgnMinSmartDegenCount", "gmgnRequireKol", "gmgnMinKolCount", "gmgnMinTotalFeeSol"].includes(inputKey) ? "safety"
+      : ["gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume", "gmgnAthFilterPct", "gmgnMinHolders", "gmgnHoldersLimit", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(inputKey) ? "gmgn"
+      : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" || inputKey === "gmgnIndicatorFilter" || inputKey === "gmgnRequireBbPosition" || inputKey === "gmgnIndicatorInterval" || inputKey === "gmgnRequireBullishSt" || inputKey === "gmgnRejectAtBottom" || inputKey === "gmgnRequireAboveSt" || inputKey === "gmgnMinRsi" || inputKey === "gmgnMaxRsi" ? "indicators"
       : ["minBinsBelow", "maxBinsBelow"].includes(inputKey) ? "strategy"
-      : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(inputKey) ? "screen"
+      : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource"].includes(inputKey) ? "screen"
       : "risk";
     _pendingInput = { key: inputKey, page: inputPage, menuMsgId: msg.messageId };
     await answerCallbackQuery(msg.callbackQueryId);
@@ -1624,16 +1692,12 @@ async function applySettingsMenuCallback(msg) {
     return;
   }
   page = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(key) ? "kol"
-    : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(key) ? "screen"
-    : key.startsWith("gmgn") && key !== "gmgnRequireKol"
-      ? "gmgn"
-      : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
-        ? "indicators"
-        : ["minBinsBelow", "maxBinsBelow"].includes(key)
-          ? "strategy"
-          : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(key)
-            ? "screen"
-            : "risk";
+    : ["gmgnMaxTop10HolderRate", "gmgnMaxBundlerRate", "gmgnMaxRatTraderRate", "gmgnMaxFreshWalletRate", "gmgnMaxDevTeamHoldRate", "gmgnMaxBotDegenRate", "gmgnMaxRugRatio", "gmgnMaxSniperCount", "gmgnMaxSniperHoldRate", "gmgnMinSmartDegenCount", "gmgnRequireKol", "gmgnMinKolCount", "gmgnMinTotalFeeSol"].includes(key) ? "safety"
+    : ["gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume", "gmgnAthFilterPct", "gmgnMinHolders", "gmgnHoldersLimit", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(key) ? "gmgn"
+    : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals" || key === "gmgnIndicatorFilter" || key === "gmgnRequireBbPosition" || key === "gmgnIndicatorInterval" || key === "gmgnRequireBullishSt" || key === "gmgnRejectAtBottom" || key === "gmgnRequireAboveSt" || key === "gmgnMinRsi" || key === "gmgnMaxRsi" ? "indicators"
+    : ["minBinsBelow", "maxBinsBelow"].includes(key) ? "strategy"
+    : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource"].includes(key) ? "screen"
+    : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
   await showSettingsMenu({ messageId: msg.messageId, page });
 }
@@ -1968,6 +2032,10 @@ function formatHelpText() {
     "/positions — list open positions",
     "/history — last 10 closed positions",
     "/learn — performance summary + recent lessons",
+    "/performance — detailed performance: 24h/7d/30d breakdown",
+    "/performance 7d — last 7 days performance",
+    "/performance 30d — last 30 days performance",
+    "/performance all — all-time performance",
     "/observe — exit rule snapshot: reasons, OOR counts, active profile",
     "/observe <N> — same aggregated over last N days (max 7)",
     "/observe details — trailing-armed OOR closes with pair + PnL",
@@ -2366,6 +2434,94 @@ async function telegramHandler(msg) {
       }
       await sendHTML(lines.join("\n"));
     } catch (e) { await sendHTML(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  if (text === "/performance" || text.startsWith("/performance ")) {
+    try {
+      const arg = text.slice("/performance".length).trim();
+      const periodHours = arg === "7d" ? 168 : arg === "30d" ? 720 : arg === "all" ? 87600 : 24;
+      const periodLabel = arg === "7d" ? "7 days" : arg === "30d" ? "30 days" : arg === "all" ? "all time" : "24 hours";
+
+      const hist = getPerformanceHistory({ hours: periodHours, limit: 1000 });
+      const allTime = getPerformanceSummary();
+
+      if (!allTime || hist.count === 0) {
+        await sendHTML(`<b>📊 Performance</b>\n\nNo closed positions recorded yet.`);
+        return;
+      }
+
+      // Period stats
+      const p = hist.positions;
+      const wins = p.filter(r => r.pnl_usd > 0).length;
+      const losses = p.filter(r => r.pnl_usd <= 0).length;
+      const totalPnl = p.reduce((s, r) => s + (r.pnl_usd ?? 0), 0);
+      const totalFees = p.reduce((s, r) => s + (r.fees_earned_usd ?? 0), 0);
+      const avgPnl = p.length > 0 ? p.reduce((s, r) => s + (r.pnl_pct ?? 0), 0) / p.length : 0;
+      const winRate = p.length > 0 ? Math.round(wins / p.length * 100) : 0;
+
+      // Best/worst pools
+      const byPool = {};
+      for (const r of p) {
+        const key = r.pool_name || r.pool?.slice(0, 8) || "?";
+        if (!byPool[key]) byPool[key] = { pnl: 0, fees: 0, count: 0 };
+        byPool[key].pnl += r.pnl_usd ?? 0;
+        byPool[key].fees += r.fees_earned_usd ?? 0;
+        byPool[key].count++;
+      }
+      const poolEntries = Object.entries(byPool).sort((a, b) => b[1].pnl - a[1].pnl);
+      const bestPool = poolEntries[0];
+      const worstPool = poolEntries[poolEntries.length - 1];
+
+      // Close reason breakdown
+      const byReason = {};
+      for (const r of p) {
+        const reason = r.close_reason || "unknown";
+        if (!byReason[reason]) byReason[reason] = { count: 0, pnl: 0 };
+        byReason[reason].count++;
+        byReason[reason].pnl += r.pnl_usd ?? 0;
+      }
+      const reasonLines = Object.entries(byReason)
+        .sort((a, b) => b[1].count - a[1].count)
+        .map(([reason, data]) => {
+          const sign = data.pnl >= 0 ? "+" : "";
+          return `  ${htmlEscape(reason)}: ${data.count}x (${sign}$${data.pnl.toFixed(2)})`;
+        });
+
+      const pnlSign = totalPnl >= 0 ? "+" : "";
+      const pnlEmoji = totalPnl >= 0 ? "🟢" : "🔴";
+      const allPnlSign = allTime.total_pnl_usd >= 0 ? "+" : "";
+
+      const lines = [
+        `<b>📊 Performance — ${periodLabel}</b>`,
+        ``,
+        `<b>Period</b>`,
+        `Positions: ${hist.count} (W:${wins} L:${losses})`,
+        `Win rate: ${winRate}%`,
+        `Total PnL: ${pnlEmoji} ${pnlSign}$${totalPnl.toFixed(2)}`,
+        `Avg PnL: ${avgPnl >= 0 ? "+" : ""}${avgPnl.toFixed(2)}%`,
+        `Fees earned: $${totalFees.toFixed(2)}`,
+        ``,
+        `<b>All Time</b>`,
+        `Positions: ${allTime.total_positions_closed} | Win rate: ${allTime.win_rate_pct}%`,
+        `Total PnL: ${allPnlSign}$${allTime.total_pnl_usd} | Range eff: ${allTime.avg_range_efficiency_pct}%`,
+      ];
+
+      if (bestPool && worstPool && poolEntries.length > 1) {
+        lines.push("", `<b>Pool PnL</b>`);
+        lines.push(`Best: ${htmlEscape(bestPool[0])} (${bestPool[1].count}x, +$${bestPool[1].pnl.toFixed(2)})`);
+        if (bestPool[0] !== worstPool[0]) {
+          lines.push(`Worst: ${htmlEscape(worstPool[0])} (${worstPool[1].count}x, $${worstPool[1].pnl.toFixed(2)})`);
+        }
+      }
+
+      if (reasonLines.length > 0) {
+        lines.push("", `<b>Close Reasons</b>`);
+        lines.push(...reasonLines);
+      }
+
+      await sendHTML(lines.join("\n"));
+    } catch (e) { await sendHTML(`Error: ${htmlEscape(e.message)}`).catch(() => {}); }
     return;
   }
 
