@@ -16,6 +16,7 @@
  *   PnL Poll Gap — emergency floor before peak gate
  *   GMGN Settings — CONFIG_MAP + UI structure
  *   Agent — allowSkip option for SCREENER
+ *   Volume Trend — classification + score boost + deploy validation
  *
  * Run: node test/test-regression.js
  */
@@ -978,6 +979,99 @@ console.log("\n── Agent: allowSkip option for SCREENER ──");
   // But the goal explicitly says "If no pool qualifies, report ⛔ NO DEPLOY" — so the
   // model should be allowed to return text. allowSkip: true enables this.
   assert(true, "Agent: allowSkip rationale documented (text response allowed for SCREENER skip)");
+}
+
+
+// ─── SECTION 17: Volume Trend Acceleration ────────────────────────────────
+
+console.log("\n── Volume Trend: classification + score boost + deploy validation ──");
+
+function classifyVolumeTrend(volChangePct, accel = 10, decel = -10) {
+  if (volChangePct == null) return "unknown";
+  if (!Number.isFinite(volChangePct)) return "unknown";
+  if (volChangePct > accel) return "accelerating";
+  if (volChangePct < decel) return "decelerating";
+  return "stable";
+}
+
+function hasAcceleratingBoost(pool, accel = 10) {
+  return classifyVolumeTrend(Number(pool.volume_change_pct), accel) === "accelerating";
+}
+
+{
+  assertEquals(classifyVolumeTrend(15), "accelerating", "VT: +15% → accelerating");
+  assertEquals(classifyVolumeTrend(10.1), "accelerating", "VT: +10.1% → accelerating (just above)");
+  assertEquals(classifyVolumeTrend(10), "stable", "VT: exactly +10% → stable (not above)");
+  assertEquals(classifyVolumeTrend(5), "stable", "VT: +5% → stable");
+  assertEquals(classifyVolumeTrend(0), "stable", "VT: 0% → stable");
+  assertEquals(classifyVolumeTrend(-5), "stable", "VT: -5% → stable");
+  assertEquals(classifyVolumeTrend(-10), "stable", "VT: exactly -10% → stable (not below)");
+  assertEquals(classifyVolumeTrend(-10.1), "decelerating", "VT: -10.1% → decelerating (just below)");
+  assertEquals(classifyVolumeTrend(-20), "decelerating", "VT: -20% → decelerating");
+  assertEquals(classifyVolumeTrend(null), "unknown", "VT: null → unknown");
+  assertEquals(classifyVolumeTrend(undefined), "unknown", "VT: undefined → unknown");
+  assertEquals(classifyVolumeTrend(NaN), "unknown", "VT: NaN → unknown");
+  assertEquals(classifyVolumeTrend("x"), "unknown", "VT: non-number → unknown");
+}
+
+{
+  assertEquals(classifyVolumeTrend(20, 25, -5), "stable", "VT: custom thresholds, +20% within 25/-5 → stable");
+  assertEquals(classifyVolumeTrend(30, 25, -5), "accelerating", "VT: custom thresholds, +30% > 25 → accelerating");
+  assertEquals(classifyVolumeTrend(-10, 25, -5), "decelerating", "VT: custom thresholds, -10% < -5 → decelerating");
+}
+
+{
+  const stablePool = { fee_active_tvl_ratio: 0.5, volume_change_pct: 5 };
+  const accelPool = { fee_active_tvl_ratio: 0.5, volume_change_pct: 15 };
+  const decelPool = { fee_active_tvl_ratio: 0.5, volume_change_pct: -20 };
+  const unknownPool = { fee_active_tvl_ratio: 0.5, volume_change_pct: null };
+  assertEquals(hasAcceleratingBoost(stablePool), false, "VT Boost: stable pool → no boost");
+  assertEquals(hasAcceleratingBoost(accelPool), true, "VT Boost: accelerating pool → boost");
+  assertEquals(hasAcceleratingBoost(decelPool), false, "VT Boost: decelerating pool → no boost");
+  assertEquals(hasAcceleratingBoost(unknownPool), false, "VT Boost: unknown pool → no boost");
+}
+
+{
+  const decelThreshold = -10;
+  function validateVolumeTrend(volumeChangePct, blockDecel, decelThresh) {
+    if (blockDecel && volumeChangePct != null && volumeChangePct < decelThresh) {
+      return { pass: false, reason: `Pool volume decelerating ${volumeChangePct}%` };
+    }
+    return { pass: true };
+  }
+  let r = validateVolumeTrend(-15, true, decelThreshold);
+  assertEquals(r.pass, false, "VT Deploy: blockDecel=true + decelerating → reject");
+  assert(r.reason.includes("decelerating"), "VT Deploy: reject reason mentions decelerating");
+  r = validateVolumeTrend(5, true, decelThreshold);
+  assertEquals(r.pass, true, "VT Deploy: blockDecel=true + stable → pass");
+  r = validateVolumeTrend(15, true, decelThreshold);
+  assertEquals(r.pass, true, "VT Deploy: blockDecel=true + accelerating → pass");
+  r = validateVolumeTrend(-15, false, decelThreshold);
+  assertEquals(r.pass, true, "VT Deploy: blockDecel=false + decelerating → pass (LLM decides)");
+  r = validateVolumeTrend(null, true, decelThreshold);
+  assertEquals(r.pass, true, "VT Deploy: null volume → pass");
+}
+
+{
+  const fs = await import("fs");
+  const { fileURLToPath } = await import("url");
+  const configPath = fileURLToPath(new URL("../config.js", import.meta.url));
+  const execPath = fileURLToPath(new URL("../tools/executor.js", import.meta.url));
+  const screenPath = fileURLToPath(new URL("../tools/screening.js", import.meta.url));
+  const configSrc = fs.readFileSync(configPath, "utf8");
+  const execSrc = fs.readFileSync(execPath, "utf8");
+  const screenSrc = fs.readFileSync(screenPath, "utf8");
+  assert(configSrc.includes("volumeTrendFilter"), "VT config: volumeTrendFilter exists");
+  assert(configSrc.includes("volumeTrendAccelThreshold"), "VT config: volumeTrendAccelThreshold exists");
+  assert(configSrc.includes("volumeTrendDecelThreshold"), "VT config: volumeTrendDecelThreshold exists");
+  assert(configSrc.includes("volumeTrendBlockDecel"), "VT config: volumeTrendBlockDecel exists");
+  assert(execSrc.includes("volumeTrendFilter"), "VT executor: volumeTrendFilter in CONFIG_MAP");
+  assert(execSrc.includes("volumeTrendBlockDecel"), "VT executor: volumeTrendBlockDecel in CONFIG_MAP");
+  assert(screenSrc.includes("classifyVolumeTrend"), "VT screening: classifyVolumeTrend function exists");
+  assert(screenSrc.includes("volume_trend: classifyVolumeTrend"), "VT screening: condensePool includes volume_trend field");
+  assert(screenSrc.includes("trend === \"accelerating\" ? 100 : 0"), "VT screening: score boost +100 for accelerating");
+  assert(screenSrc.includes("volumeTrendBlockDecel"), "VT screening: filter uses blockDecel flag");
+  assert(execSrc.includes("Pool volume decelerating"), "VT executor: deploy validation rejects decelerating");
 }
 
 

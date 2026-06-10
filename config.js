@@ -124,6 +124,11 @@ export const config = {
     timeOfDayCheck:         u.timeOfDayCheck         ?? true,     // master toggle
     riskyHours:             u.riskyHours             ?? [0,1,2,3,4,16,17], // UTC hours with high SL rate
     minTokenAgeForTimeCheck: u.minTokenAgeForTimeCheck ?? 24,     // only block young tokens (< this age in hours)
+    // Volume Trend Acceleration
+    volumeTrendFilter:         u.volumeTrendFilter         ?? true,  // master toggle
+    volumeTrendAccelThreshold: u.volumeTrendAccelThreshold ?? 10,   // above = accelerating
+    volumeTrendDecelThreshold: u.volumeTrendDecelThreshold ?? -10,  // below = decelerating
+    volumeTrendBlockDecel:     u.volumeTrendBlockDecel     ?? false, // hard-block decelerating (false = LLM decides)
   },
 
   gmgn: {

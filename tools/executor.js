@@ -187,6 +187,18 @@ async function validateDeployPoolThresholds(args) {
     }
   }
 
+  // ─── Volume Trend Acceleration ───
+  if (config.screening.volumeTrendFilter && config.screening.volumeTrendBlockDecel) {
+    const volumeChangePct = numberOrNull(detail?.volume_change_pct);
+    const decelThreshold = numberOrNull(config.screening.volumeTrendDecelThreshold) ?? -10;
+    if (volumeChangePct != null && volumeChangePct < decelThreshold) {
+      return {
+        pass: false,
+        reason: `Pool volume decelerating ${volumeChangePct}% (threshold ${decelThreshold}%). All catastrophic losses cluster in decelerating pools.`,
+      };
+    }
+  }
+
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
   let volatilityDetail = detail;
   if ((config.screening.timeframe || "5m") !== volatilityTimeframe) {
@@ -389,6 +401,11 @@ const toolMap = {
       riskyHours:             ["screening", "riskyHours"],
       minTokenAgeForTimeCheck: ["screening", "minTokenAgeForTimeCheck"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
+      // Volume Trend
+      volumeTrendFilter:         ["screening", "volumeTrendFilter"],
+      volumeTrendAccelThreshold: ["screening", "volumeTrendAccelThreshold"],
+      volumeTrendDecelThreshold: ["screening", "volumeTrendDecelThreshold"],
+      volumeTrendBlockDecel:     ["screening", "volumeTrendBlockDecel"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],

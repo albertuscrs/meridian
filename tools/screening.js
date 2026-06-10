@@ -29,6 +29,18 @@ function normalizeSymbol(symbol) {
   return String(symbol || "").trim().toUpperCase();
 }
 
+function classifyVolumeTrend(volumeChangePct) {
+  if (volumeChangePct == null) return "unknown";
+  const cfg = config.screening;
+  if (!cfg.volumeTrendFilter) return "unknown";
+  const accel = Number(cfg.volumeTrendAccelThreshold ?? 10);
+  const decel = Number(cfg.volumeTrendDecelThreshold ?? -10);
+  if (!Number.isFinite(volumeChangePct)) return "unknown";
+  if (volumeChangePct > accel) return "accelerating";
+  if (volumeChangePct < decel) return "decelerating";
+  return "stable";
+}
+
 function scoreCandidate(pool) {
   if (Number.isFinite(Number(pool.gmgn_score))) {
     return Number(pool.gmgn_score) + Number(pool.fee_active_tvl_ratio || 0) * 500;
@@ -37,7 +49,10 @@ function scoreCandidate(pool) {
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
-  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+  // Volume Trend Acceleration boost: +100 for accelerating pools (data-validated: safest segment)
+  const trend = classifyVolumeTrend(Number(pool.volume_change_pct));
+  const trendBoost = trend === "accelerating" ? 100 : 0;
+  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100 + trendBoost;
 }
 
 function numeric(value) {
@@ -587,6 +602,25 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
   const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
 
+  // GMGN pools lack `volume_change_pct` — enrich with Meteora detail before scoring/sorting.
+  // Only runs for GMGN source, only for pools that pass initial structural checks, max 1 API call per pool.
+  if (source === "gmgn" && pools.length > 0) {
+    const enrichTargets = pools.filter((p) => p.volume_change_pct == null).slice(0, Math.max(limit, config.gmgn.enrichLimit || 20));
+    if (enrichTargets.length > 0) {
+      const results = await Promise.allSettled(
+        enrichTargets.map((p) => fetchPoolDiscoveryDetail({ poolAddress: p.pool, timeframe: config.screening.timeframe || "5m" }))
+      );
+      enrichTargets.forEach((p, i) => {
+        const r = results[i];
+        if (r.status === "fulfilled" && r.value) {
+          p.volume_change_pct = r.value.volume_change_pct ?? null;
+        }
+      });
+      const populated = results.filter((r) => r.status === "fulfilled" && r.value?.volume_change_pct != null).length;
+      log("screening", `GMGN enrichment: populated volume_change_pct for ${populated}/${enrichTargets.length} GMGN pools`);
+    }
+  }
+
   const eligible = pools
     .filter((p) => {
       const tvl = Number(p.tvl ?? p.active_tvl ?? 0);
@@ -673,6 +707,15 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         if (riskyHours.includes(currentHour) && tokenAgeHours != null && tokenAgeHours < minAge) {
           log("screening", `Filtered time-of-day pool ${p.name} (hour=${currentHour} UTC, age=${tokenAgeHours}h < ${minAge}h)`);
           pushFilteredReason(filteredOut, p, `risky window ${currentHour}:00 UTC + young token (${tokenAgeHours}h < ${minAge}h)`);
+          return false;
+        }
+      }
+      // Volume Trend: hard-block decelerating pools if enabled
+      if (config.screening.volumeTrendFilter && config.screening.volumeTrendBlockDecel) {
+        const trend = classifyVolumeTrend(Number(p.volume_change_pct));
+        if (trend === "decelerating") {
+          log("screening", `Filtered volume-trend-decel pool ${p.name} (vol_change=${p.volume_change_pct}%)`);
+          pushFilteredReason(filteredOut, p, `volume decelerating ${p.volume_change_pct}% (below ${config.screening.volumeTrendDecelThreshold}%)`);
           return false;
         }
       }
@@ -841,6 +884,7 @@ function condensePool(p) {
 
     // Activity trends
     volume_change_pct: fix(p.volume_change_pct, 1),
+    volume_trend: classifyVolumeTrend(numeric(p.volume_change_pct)),
     fee_change_pct: fix(p.fee_change_pct, 1),
     swap_count: p.swap_count,
     unique_traders: p.unique_traders,

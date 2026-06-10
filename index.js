@@ -1299,6 +1299,10 @@ function settingValue(key) {
     gmgnMaxSniperHoldRate: config.gmgn.maxSniperHoldRate,
     gmgnMinSmartDegenCount: config.gmgn.minSmartDegenCount,
     gmgnRequireBbPosition: config.gmgn.indicatorRules?.requireBbPosition,
+    volumeTrendFilter: config.screening.volumeTrendFilter,
+    volumeTrendAccelThreshold: config.screening.volumeTrendAccelThreshold,
+    volumeTrendDecelThreshold: config.screening.volumeTrendDecelThreshold,
+    volumeTrendBlockDecel: config.screening.volumeTrendBlockDecel,
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
     maxBinsBelow: config.strategy.maxBinsBelow,
@@ -1454,6 +1458,12 @@ function renderSettingsMenu(page = "main") {
       [
         inputButton("gmgnMaxTokenAgeHours", "Max token age (h)")[0],
         inputButton("gmgnMaxBundlerRate", "Max bundler %")[0],
+      ],
+      [toggleButton("volumeTrendFilter", "Volume trend filter")],
+      [toggleButton("volumeTrendBlockDecel", "Block decelerating")],
+      [
+        inputButton("volumeTrendAccelThreshold", "Accel threshold")[0],
+        inputButton("volumeTrendDecelThreshold", "Decel threshold")[0],
       ],
       [settingButton("KOL settings", "cfg:page:kol")],
       inputButton("managementIntervalMin", "Manage interval (min)"),
@@ -1675,7 +1685,7 @@ async function applySettingsMenuCallback(msg) {
     : ["gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume", "gmgnAthFilterPct", "gmgnMinHolders", "gmgnHoldersLimit", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(key) ? "gmgn"
     : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals" || key === "gmgnIndicatorFilter" || key === "gmgnRequireBbPosition" || key === "gmgnIndicatorInterval" || key === "gmgnRequireBullishSt" || key === "gmgnRejectAtBottom" || key === "gmgnRequireAboveSt" || key === "gmgnMinRsi" || key === "gmgnMaxRsi" ? "indicators"
     : ["minBinsBelow", "maxBinsBelow"].includes(key) ? "strategy"
-    : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource"].includes(key) ? "screen"
+    : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "volumeTrendFilter", "volumeTrendAccelThreshold", "volumeTrendDecelThreshold", "volumeTrendBlockDecel"].includes(key) ? "screen"
     : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
   await showSettingsMenu({ messageId: msg.messageId, page });
