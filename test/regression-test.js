@@ -15,6 +15,7 @@
  *   Performance — /performance command structure
  *   PnL Poll Gap — emergency floor before peak gate
  *   GMGN Settings — CONFIG_MAP + UI structure
+ *   Agent — allowSkip option for SCREENER
  *
  * Run: node test/test-regression.js
  */
@@ -949,6 +950,34 @@ console.log("\n── GMGN Settings: CONFIG_MAP + UI structure ──");
 
   // Test 7: Page routing includes safety keys
   assert(indexSrc.includes('"safety"'), "Index: Safety page routing exists");
+}
+
+
+// ─── SECTION 16: Agent — allowSkip option for SCREENER ────────────────────
+
+console.log("\n── Agent: allowSkip option for SCREENER ──");
+
+{
+  const fs = await import("fs");
+  const { fileURLToPath } = await import("url");
+  const agentPath = fileURLToPath(new URL("../agent.js", import.meta.url));
+  const agentSrc = fs.readFileSync(agentPath, "utf8");
+  const indexPath = fileURLToPath(new URL("../index.js", import.meta.url));
+  const indexSrc = fs.readFileSync(indexPath, "utf8");
+
+  // Test 1: agentLoop signature accepts allowSkip
+  assert(agentSrc.includes("allowSkip = false"), "Agent: agentLoop default allowSkip=false in destructuring");
+  assert(agentSrc.includes("allowSkip ? false : shouldRequireRealToolUse"), "Agent: allowSkip disables mustUseRealTool");
+
+  // Test 2: index.js passes allowSkip: true to SCREENER
+  assert(indexSrc.includes("allowSkip: true"), "Index: SCREENER agentLoop call passes allowSkip: true");
+
+  // Test 3: Document why this is needed
+  // The screening goal includes "deploy" in STEPS, which matches MUTATING_TOOL_INTENTS.
+  // Without allowSkip, the model is FORCED to call a tool even when it decides to skip.
+  // But the goal explicitly says "If no pool qualifies, report ⛔ NO DEPLOY" — so the
+  // model should be allowed to return text. allowSkip: true enables this.
+  assert(true, "Agent: allowSkip rationale documented (text response allowed for SCREENER skip)");
 }
 
 

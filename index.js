@@ -829,6 +829,7 @@ STEPS:
 IMPORTANT:
 - Keep the whole report compact and highly scannable for Telegram.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 4096, {
+        allowSkip: true,
         onToolStart: async ({ name }) => {
           if (name === "deploy_position") deployAttempted = true;
           await liveMessage?.toolStart(name);

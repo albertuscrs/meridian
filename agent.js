@@ -181,7 +181,7 @@ function isThinkingModeToolChoiceError(error) {
  * @returns {string} - The agent's final text response
  */
 export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHistory = [], agentType = "GENERAL", model = null, maxOutputTokens = null, options = {}) {
-  const { interactive = false, onToolStart = null, onToolFinish = null } = options;
+  const { interactive = false, onToolStart = null, onToolFinish = null, allowSkip = false } = options;
   // Build dynamic system prompt with current portfolio state
   const [portfolio, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
   const stateSummary = getStateSummary();
@@ -207,7 +207,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   // These lock after first attempt regardless of success — retrying them is always wrong
   const NO_RETRY_TOOLS = new Set(["deploy_position"]);
   const firedOnce = new Set();
-  const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
+  const mustUseRealTool = allowSkip ? false : shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
   let noToolRetryCount = 0;
   // Stays true for the whole run once a thinking-mode provider rejects tool_choice
