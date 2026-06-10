@@ -359,7 +359,7 @@ No longer spams screening every 3 minutes when no positions open.
 
 ---
 
-## Session Notes (2026-05-23 to 2026-05-29)
+## Session Notes (2026-05-23 to 2026-06-10)
 
 ### What Was Done
 
@@ -438,11 +438,15 @@ No longer spams screening every 3 minutes when no positions open.
 
 6. **`numeric()` vs `numberOrNull()`** — Different files use different helpers. `screening.js` uses `numeric()`, `executor.js` uses `numberOrNull()`. Don't mix them.
 
+7. **Data-validated screening filters** — Volume Trend Acceleration. User provided closed-position data: 558 positions, ALL catastrophic losses cluster in pools with `volume_change_pct < -10%`. Adding `volume_trend` field + score boost +100 for accelerating pools + GMGN enrichment (1 API call) + hard-block option (default off) was a 173-line change that closed a real data gap.
+
+8. **Surgical upstream merge for massive refactor** — `5fae0c5` (612 deletions, 333 additions) conflicted in 5 files with our local R-implementations. Resolved manually keeping all local features (Fee Drift CONFIG_MAP, OPERATOR_ONLY_KEYS, displayPnlPct, maxVolatility evolution). 8 conflict files resolved in ~30 min.
+
 ---
 
 ## Regression Tests (Updated)
 
-`test/regression-test.js` — 176 inline unit tests.
+`test/regression-test.js` — 217 inline unit tests.
 Run: `node test/regression-test.js`
 
 | Test group | Cases | What it covers |
@@ -462,3 +466,5 @@ Run: `node test/regression-test.js`
 | PnL Poll Gap | 14 | emergency before peak gate, diagnostic log |
 | GMGN Settings | 39 | CONFIG_MAP, Safety page, Volume page, Indicators |
 | Jupiter API | 14 | health check, API key, URL constants |
+| Agent allowSkip | 4 | option, signature, mustUseRealTool bypass |
+| Volume Trend | 37 | classification, custom thresholds, score boost, deploy validation, code structure |

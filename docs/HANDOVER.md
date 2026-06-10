@@ -624,12 +624,13 @@ Format: `**YYYY-MM-DD** — Brief description (commit hash)`
 - **2026-06-08** — Upstream cherry-pick: 1e053a2 (drop 15m timeframe) applied. Conflicts in prompt.js (kept upstream 30m instead of 15m). New file screening-scales.js added. Other 3 files (definitions.js, executor.js, screening.js) auto-merged. 5fae0c5 still skipped (too large). 176/176 regression tests pass, bot restarted.
 - **2026-06-08** — Upstream cherry-pick: 5fae0c5 (entry/exit learning, HiveMind market push, OKX removal) applied. Conflicts resolved in config.js, prompt.js, telegram.js, tools/executor.js, tools/dlmm.js, lessons.js, index.js, screening-scales.js. Kept local features: Fee Drift config keys, GMGN settings CONFIG_MAP, OPERATOR_ONLY_KEYS, displayPnlPct with appendDecision, maxVolatility evolution. Upstream added: repo-root.js (PM2 cwd fix), entry/exit market context in lessons.js, log rotation, screening-scales.js with 30m scaling. New file repo-root.js added. 176/176 regression tests pass, bot restarted.
 - **2026-06-08** — Screening "no tool call was made" error fix: Added `allowSkip` option to `agentLoop` in agent.js. When `allowSkip: true` is passed, `mustUseRealTool` is disabled, allowing the model to return text when it decides to skip a cycle. The screening goal explicitly says "If no pool qualifies, report ⛔ NO DEPLOY" but the MUTATING_TOOL_INTENTS regex was forcing the model to call a tool (rejecting the text response). Index.js SCREENER call now passes `allowSkip: true`. 180/180 regression tests pass, bot restarted.
+- **2026-06-10** — Volume Trend Acceleration classification: Classifies pools by `volume_change_pct` into `accelerating` (>10) / `stable` (-10 to 10) / `decelerating` (<-10) / `unknown` (null). Data-validated: ALL catastrophic losses cluster in "decelerating" pools (111 positions, -0.23% avg PnL). "Accelerating" pools get +100 score boost. GMGN enrichment: 1 API call per GMGN pool to fetch Meteora pool detail (GMGN pipeline doesn't expose `volume_change_pct`). 4 config keys: `volumeTrendFilter`, `volumeTrendAccelThreshold` (10), `volumeTrendDecelThreshold` (-10), `volumeTrendBlockDecel` (false — LLM decides). Deploy validation re-check. `/settings` Telegram buttons. 37 new regression tests, 217/217 total pass, bot restarted.
 
 ### Diverged Commits
 
-- **experimental ahead:** 21 commits (all local features — Fee Drift, Catastrophic SL blacklist, Time-of-Day, PnL Poll Gap, GMGN Settings, Jupiter fix, etc.)
-- **upstream/experimental ahead:** 2 commits (1e053a2 + 5fae0c5)
-- **Local branch has 23-commit lead on upstream** but upstream has 2 large new features not yet integrated
+- **experimental ahead:** 25 commits (all local features — Fee Drift, Catastrophic SL blacklist, Time-of-Day, PnL Poll Gap, GMGN Settings, Jupiter fix, allowSkip, Volume Trend, etc.)
+- **upstream/experimental ahead:** 0 commits (1e053a2 + 5fae0c5 both cherry-picked)
+- **Local branch is 25 commits ahead of upstream — fully in sync**
 
 ---
 
@@ -879,9 +880,34 @@ Skip deploy if token age < 24 hours AND current hour is in high-risk window (00-
 
 **Files:** `index.js` (command handler), `lessons.js` (getPerformanceHistory already existed)
 
-### M3: Log Rotation ✅ DONE (2026-05-23)
+### S2: Volume Trend Acceleration ✅ DONE (2026-06-10)
 
-**Implementation:** `rotateOldLogs()` in `logger.js` — deletes log files older than 7 days. Runs at startup. Cleans `agent-*.log`, `actions-*.jsonl`, `snapshots-*.jsonl`.
+**Problem:** All catastrophic losses cluster in pools with declining volume. Data analysis of 558 closed positions:
+- Accelerating (vol_change > 10%): 341 positions, +0.21% avg PnL, **0 catastrophic losses**
+- Stable (-10 ≤ vol ≤ 10): 106 positions, +0.42% avg PnL, **0 catastrophic losses**
+- Decelerating (vol_change < -10%): 111 positions, -0.23% avg PnL, **ALL catastrophic losses**
+
+**Implementation:**
+- `classifyVolumeTrend()` in `screening.js` — classifies into accelerating/stable/decelerating/unknown
+- `volume_trend` field added to `condensePool()` output for LLM context
+- Score boost +100 for accelerating pools in `scoreCandidate()`
+- Hard-block filter (default off — LLM decides via `volumeTrendBlockDecel`)
+- GMGN enrichment: 1 API call per eligible GMGN pool to fetch Meteora pool detail (GMGN pipeline doesn't expose `volume_change_pct` natively)
+- Deploy validation re-check in `executor.js`
+
+**Config keys (screening section):**
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `volumeTrendFilter` | `true` | Master toggle |
+| `volumeTrendAccelThreshold` | `10` | Above = accelerating |
+| `volumeTrendDecelThreshold` | `-10` | Below = decelerating |
+| `volumeTrendBlockDecel` | `false` | Hard-block decelerating (false = LLM decides) |
+
+**`/settings` UI:** Screen page has 2 toggles (filter on/off, block decelerating) + 2 threshold inputs.
+
+**Files:** `config.js`, `tools/screening.js`, `tools/executor.js`, `index.js`, `tools/definitions.js`, `test/regression-test.js`
+
+### M3: Log Rotation ✅ DONE (2026-05-23)**Implementation:** `rotateOldLogs()` in `logger.js` — deletes log files older than 7 days. Runs at startup. Cleans `agent-*.log`, `actions-*.jsonl`, `snapshots-*.jsonl`.
 
 **Config:** `LOG_RETENTION_DAYS` env var (default 7)
 
