@@ -359,7 +359,7 @@ No longer spams screening every 3 minutes when no positions open.
 
 ---
 
-## Session Notes (2026-05-23 to 2026-06-10)
+## Session Notes (2026-05-23 to 2026-06-11)
 
 ### What Was Done
 
@@ -442,11 +442,13 @@ No longer spams screening every 3 minutes when no positions open.
 
 8. **Surgical upstream merge for massive refactor** — `5fae0c5` (612 deletions, 333 additions) conflicted in 5 files with our local R-implementations. Resolved manually keeping all local features (Fee Drift CONFIG_MAP, OPERATOR_ONLY_KEYS, displayPnlPct, maxVolatility evolution). 8 conflict files resolved in ~30 min.
 
+9. **Visual management display helpers** — `fmtAge` (formats `83m` → `1h 23m`), `positionStatusEmoji` (5-level status: ⚪/🟢/🟡/🟠/🔴), `feeTvlBar` (visual bar `▁▂▃▄▅▆` based on yield magnitude). Multi-line layout per position makes mgmt cycle reports scannable in Telegram. User asked for "more intuitive" — 4 helpers + 48 regression tests (265/265 pass) in 173-line change.
+
 ---
 
 ## Regression Tests (Updated)
 
-`test/regression-test.js` — 217 inline unit tests.
+`test/regression-test.js` — 265 inline unit tests.
 Run: `node test/regression-test.js`
 
 | Test group | Cases | What it covers |
@@ -468,3 +470,4 @@ Run: `node test/regression-test.js`
 | Jupiter API | 14 | health check, API key, URL constants |
 | Agent allowSkip | 4 | option, signature, mustUseRealTool bypass |
 | Volume Trend | 37 | classification, custom thresholds, score boost, deploy validation, code structure |
+| Mgmt Display | 48 | fmtAge (1h 23m format), positionStatusEmoji (5-level), feeTvlBar (6 tiers), yield with /24h |

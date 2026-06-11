@@ -625,6 +625,7 @@ Format: `**YYYY-MM-DD** — Brief description (commit hash)`
 - **2026-06-08** — Upstream cherry-pick: 5fae0c5 (entry/exit learning, HiveMind market push, OKX removal) applied. Conflicts resolved in config.js, prompt.js, telegram.js, tools/executor.js, tools/dlmm.js, lessons.js, index.js, screening-scales.js. Kept local features: Fee Drift config keys, GMGN settings CONFIG_MAP, OPERATOR_ONLY_KEYS, displayPnlPct with appendDecision, maxVolatility evolution. Upstream added: repo-root.js (PM2 cwd fix), entry/exit market context in lessons.js, log rotation, screening-scales.js with 30m scaling. New file repo-root.js added. 176/176 regression tests pass, bot restarted.
 - **2026-06-08** — Screening "no tool call was made" error fix: Added `allowSkip` option to `agentLoop` in agent.js. When `allowSkip: true` is passed, `mustUseRealTool` is disabled, allowing the model to return text when it decides to skip a cycle. The screening goal explicitly says "If no pool qualifies, report ⛔ NO DEPLOY" but the MUTATING_TOOL_INTENTS regex was forcing the model to call a tool (rejecting the text response). Index.js SCREENER call now passes `allowSkip: true`. 180/180 regression tests pass, bot restarted.
 - **2026-06-10** — Volume Trend Acceleration classification: Classifies pools by `volume_change_pct` into `accelerating` (>10) / `stable` (-10 to 10) / `decelerating` (<-10) / `unknown` (null). Data-validated: ALL catastrophic losses cluster in "decelerating" pools (111 positions, -0.23% avg PnL). "Accelerating" pools get +100 score boost. GMGN enrichment: 1 API call per GMGN pool to fetch Meteora pool detail (GMGN pipeline doesn't expose `volume_change_pct`). 4 config keys: `volumeTrendFilter`, `volumeTrendAccelThreshold` (10), `volumeTrendDecelThreshold` (-10), `volumeTrendBlockDecel` (false — LLM decides). Deploy validation re-check. `/settings` Telegram buttons. 37 new regression tests, 217/217 total pass, bot restarted.
+- **2026-06-11** — Management cycle display improvements: 4 new helper functions in `index.js` — `fmtAge` (formats `83m` → `1h 23m`, `1440m` → `24h`), `fmtFeeTvl` (yield with `/24h` suffix), `positionStatusEmoji` (5-level: ⚪/🟢/🟡/🟠/🔴), `feeTvlBar` (visual bar `▁▂▃▄▅▆` based on yield magnitude). Multi-line layout per position: status emoji, value/PnL, range/age, fee/unclaimed, OOR/IN status. Summary line adds profitable+OOR counts + avg fee/TVL/24h. Applied to both management cycle report and `/positions` command. 48 new regression tests, 265/265 pass, bot restarted.
 
 ### Diverged Commits
 
@@ -906,6 +907,48 @@ Skip deploy if token age < 24 hours AND current hour is in high-risk window (00-
 **`/settings` UI:** Screen page has 2 toggles (filter on/off, block decelerating) + 2 threshold inputs.
 
 **Files:** `config.js`, `tools/screening.js`, `tools/executor.js`, `index.js`, `tools/definitions.js`, `test/regression-test.js`
+
+### S3: Management Cycle Display ✅ DONE (2026-06-11)
+
+**Problem:** Management cycle and `/positions` display were text-heavy and hard to scan quickly. Status wasn't visually obvious; yield magnitude wasn't shown; time format was inconsistent.
+
+**Improvements:**
+
+4 new helper functions in `index.js`:
+- `fmtAge(minutes)` — formats `83m` → `1h 23m`, `1440m` → `24h` (1 day), `0` → `0m`
+- `fmtFeeTvl(value, timeframe)` — adds `/24h` suffix to yield display
+- `positionStatusEmoji(p)` — 5-level status indicator: ⚪ (no data) / 🟢 (in range +2%+) / 🟡 (in range 0-2%) / 🟠 (in range -3 to 0%) / 🔴 (OOR or in range <-3%)
+- `feeTvlBar(value)` — visual bar chart `▁▂▃▄▅▆` based on yield magnitude (6 tiers: <1, <3, <6, <10, <20, ≥20)
+
+**Layout changes (both mgmt cycle and `/positions`):**
+- Status emoji at line start (replaces plain `📊`)
+- Multi-line layout: value/PnL, range/age, fee/unclaimed, status
+- OOR duration formatted as `1h 23m` instead of `83m`
+- Fee bar `▃▂▁` before `/24h` yield (visual magnitude)
+- Summary line: adds profitable + OOR counts, avg fee/TVL per 24h
+- Separator `─────────────` before summary
+
+**Example output:**
+```
+🟢 1. TOKEN-SOL | bid_ask
+   💰 $0.250 | PnL: +1.5% (+$0.003)
+   📍 🟢 [████████░░░░░░░░] 50% (bin 1000/900-1100) | ⏱ 1h 23m
+   📈 ▃▂▁ 5.50%/24h | 📥 $0.001 unclaimed
+   🟢 IN | 📋 HOLD
+
+🔴 2. HAZARD-SOL | spot
+   💰 $0.100 | PnL: -5.0% (-$0.005)
+   📍 🔴 [░░░░░░░░░░░░░░░░] bin 1200 (above 900–1100) | ⏱ 45m
+   📈 ▁ 0.50%/24h | 📥 $0.000 unclaimed
+   🔴 OOR 2h 5m
+
+─────────────
+📦 2 positions | 1🟢 1🔴 | 💵 $0.350
+📊 Avg PnL: -1.7% | 📈 Avg fee/TVL: 3.00%/24h | 📥 $0.001 unclaimed
+🔔 Action: none | ✅ Stay: 2
+```
+
+**Files:** `index.js` (helpers + display logic), `test/regression-test.js` (48 new tests).
 
 ### M3: Log Rotation ✅ DONE (2026-05-23)**Implementation:** `rotateOldLogs()` in `logger.js` — deletes log files older than 7 days. Runs at startup. Cleans `agent-*.log`, `actions-*.jsonl`, `snapshots-*.jsonl`.
 
