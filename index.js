@@ -367,7 +367,6 @@ export async function runManagementCycle({ silent = false } = {}) {
       const pnlSign = (p.pnl_pct ?? 0) >= 0 ? "+" : "";
       const pnlPctStr = `${pnlSign}${(p.pnl_pct ?? 0).toFixed(1)}%`;
       const pnlUsdStr = (p.pnl_usd ?? 0) >= 0 ? `+${cur}${(p.pnl_usd ?? 0).toFixed(3)}` : `-${cur}${(Math.abs(p.pnl_usd) ?? 0).toFixed(3)}`;
-      const pnlEmoji = (p.pnl_pct ?? 0) >= 0 ? "🟢" : "🔴";
       const range = fmtRangeBar(p.active_bin, p.lower_bin, p.upper_bin);
       const rangeEmoji = range.oor ? "🔴" : "🟢";
       const rangeLabel = range.oor
@@ -375,16 +374,20 @@ export async function runManagementCycle({ silent = false } = {}) {
         : `${range.bar} ${range.pct}% (bin ${p.active_bin}/${p.lower_bin}–${p.upper_bin})`;
       const val = `${cur}${(p.total_value_usd ?? 0).toFixed(3)}`;
       const unclaimed = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(3)}`;
-      const feeStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%/24h` : "—";
-      const ageStr = p.age_minutes != null ? `${p.age_minutes}m` : "—m";
-      const rangeLine = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+      const feeStr24h = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%/24h` : "—";
+      const feeBar = feeTvlBar(p.fee_per_tvl_24h);
+      const ageStr = fmtAge(p.age_minutes);
+      const rangeLine = p.in_range ? "🟢 IN" : `🔴 OOR ${fmtAge(p.minutes_out_of_range ?? 0)}`;
+      const statusEmoji = positionStatusEmoji(p);
       const actionTag = act.action === "INSTRUCTION" ? "📋 HOLD" :
                         act.action === "CLOSE" ? "⚡ CLOSE" :
                         act.action === "CLAIM" ? "📥 CLAIM" : "";
 
-      const block = [`📊 ${htmlEscape(p.pair)} | ${p.strategy ?? "spot"}`,
-        `   💰 ${val} | PnL: ${pnlEmoji} ${pnlPctStr} (${pnlUsdStr}) | Range: ${rangeEmoji} ${rangeLabel} | 📥 ${unclaimed} | 📈 ${feeStr}`,
-        `   ${rangeLine} | ⏱ ${ageStr} ${actionTag}`,
+      const block = [`${statusEmoji} <b>${htmlEscape(p.pair)}</b> | ${p.strategy ?? "spot"}`,
+        `   💰 ${val} | PnL: ${pnlPctStr} (${pnlUsdStr})`,
+        `   📍 ${rangeEmoji} ${rangeLabel} | ⏱ ${ageStr}`,
+        `   📈 ${feeBar} ${feeStr24h} | 📥 ${unclaimed} unclaimed`,
+        `   ${rangeLine}${actionTag ? ` | ${actionTag}` : ""}`,
       ];
 
       if (p.instruction) block.push(`   📝 "${htmlEscape(p.instruction)}"`);
@@ -395,18 +398,23 @@ export async function runManagementCycle({ silent = false } = {}) {
     });
 
     const stayCount = [...actionMap.values()].filter(a => a.action === "STAY").length;
+    const oorCount = positionData.filter(p => !p.in_range).length;
+    const profitableCount = positionData.filter(p => (p.pnl_pct ?? 0) > 0).length;
     const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
     const actionSummary = needsAction.length > 0
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL" : a.action).join(", ")
       : "none";
     const avgPnl = positionData.reduce((s, p) => s + (p.pnl_pct ?? 0), 0) / (positionData.length || 1);
+    const avgFee24h = positionData.reduce((s, p) => s + (p.fee_per_tvl_24h ?? 0), 0) / (positionData.length || 1);
     const avgSign = avgPnl >= 0 ? "+" : "";
     const cur = config.management.solMode ? "◎" : "$";
 
     mgmtReport =
       reportLines.join("\n\n") +
-      `\n\n📦 ${positions.length} positions | 💵 ${cur}${totalValue.toFixed(3)} | 📥 fees: ${cur}${totalUnclaimed.toFixed(3)}` +
-      `\n📊 Avg PnL: ${avgSign}${avgPnl.toFixed(2)}% | 🔔 Action: ${actionSummary} | ✅ Stay: ${stayCount}`;
+      `\n\n─────────────` +
+      `\n📦 ${positions.length} positions | ${profitableCount}🟢 ${oorCount}🔴 | 💵 ${cur}${totalValue.toFixed(3)}` +
+      `\n📊 Avg PnL: ${avgSign}${avgPnl.toFixed(2)}% | 📈 Avg fee/TVL: ${avgFee24h.toFixed(2)}%/24h | 📥 ${cur}${totalUnclaimed.toFixed(3)} unclaimed` +
+      `\n🔔 Action: ${actionSummary} | ✅ Stay: ${stayCount}`;
 
     // ── Direct-close hard exits (skip LLM for speed) ─────────────────
     // Stop-loss, trailing TP, and other updatePnlAndCheckExits triggers are
@@ -2562,33 +2570,39 @@ async function telegramHandler(msg) {
       const blocks = positions.map((p, i) => {
         const pnlSign = (p.pnl_pct ?? 0) >= 0 ? "+" : "";
         const pnlPctStr = `${pnlSign}${(p.pnl_pct ?? 0).toFixed(1)}%`;
-        const pnlEmoji = (p.pnl_pct ?? 0) >= 0 ? "🟢" : "🔴";
         const range = fmtRangeBar(p.active_bin, p.lower_bin, p.upper_bin);
         const rangeEmoji = range.oor ? "🔴" : "🟢";
         const rangeLabel = range.oor
           ? `${range.bar} bin ${p.active_bin} (${range.oor} ${p.lower_bin}–${p.upper_bin})`
           : `${range.bar} ${range.pct}% (bin ${p.active_bin}/${p.lower_bin}–${p.upper_bin})`;
         const pnlUsdStr = (p.pnl_usd ?? 0) >= 0 ? `+${cur}${(p.pnl_usd ?? 0).toFixed(3)}` : `-${cur}${(Math.abs(p.pnl_usd) ?? 0).toFixed(3)}`;
-        const ageStr = p.age_minutes != null ? `${p.age_minutes}m` : "—m";
-        const feeStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%/24h` : "—";
+        const ageStr = fmtAge(p.age_minutes);
+        const feeBar = feeTvlBar(p.fee_per_tvl_24h);
+        const feeStr24h = p.fee_per_tvl_24h != null ? `${feeBar} ${p.fee_per_tvl_24h.toFixed(2)}%/24h` : "—";
         const rangeLine = p.in_range
           ? "🟢 IN"
-          : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+          : `🔴 OOR ${fmtAge(p.minutes_out_of_range ?? 0)}`;
         const valueStr = `${cur}${(p.total_value_usd ?? 0).toFixed(3)}`;
         const unclaimedStr = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(3)}`;
+        const statusEmoji = positionStatusEmoji(p);
         const noteLine = p.instruction ? `\n   📝 "${p.instruction}"` : "";
 
         return [
-          `📊 <b>${i + 1}. ${p.pair}</b> | ${p.strategy ?? "spot"}`,
-          `   💰 ${valueStr} | PnL: ${pnlEmoji} ${pnlPctStr} (${pnlUsdStr}) | Range: ${rangeEmoji} ${rangeLabel} | 📥 ${unclaimedStr} | 📈 ${feeStr}`,
-          `   ${rangeLine} | ⏱ ${ageStr}${noteLine}`,
+          `${statusEmoji} <b>${i + 1}. ${p.pair}</b> | ${p.strategy ?? "spot"}`,
+          `   💰 ${valueStr} | PnL: ${pnlPctStr} (${pnlUsdStr})`,
+          `   📍 ${rangeEmoji} ${rangeLabel} | ⏱ ${ageStr}`,
+          `   📈 ${feeStr24h} | 📥 ${unclaimedStr} unclaimed`,
+          `   ${rangeLine}${noteLine}`,
         ].join("\n");
       });
 
       const totalValue = positions.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
       const avgPnl = positions.reduce((s, p) => s + (p.pnl_pct ?? 0), 0) / (positions.length || 1);
+      const avgFee24h = positions.reduce((s, p) => s + (p.fee_per_tvl_24h ?? 0), 0) / (positions.length || 1);
+      const profitableCount = positions.filter(p => (p.pnl_pct ?? 0) > 0).length;
+      const oorCount = positions.filter(p => !p.in_range).length;
       const avgSign = avgPnl >= 0 ? "+" : "";
-      const summary = `📦 ${total_positions} positions | 💵 Total: ${cur}${totalValue.toFixed(3)} | 📊 Avg PnL: ${avgSign}${avgPnl.toFixed(2)}%`;
+      const summary = `📦 ${total_positions} positions | ${profitableCount}🟢 ${oorCount}🔴 | 💵 Total: ${cur}${totalValue.toFixed(3)} | 📊 Avg PnL: ${avgSign}${avgPnl.toFixed(2)}% | 📈 Avg fee/TVL: ${avgFee24h.toFixed(2)}%/24h`;
 
       await sendHTML(
         `<b>📊 Open Positions (${total_positions})</b>\n\n` +
@@ -2894,6 +2908,40 @@ async function telegramHandler(msg) {
 function fmtPct(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
+}
+
+function fmtAge(minutes) {
+  if (minutes == null || !Number.isFinite(minutes)) return "—";
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+function fmtFeeTvl(value, timeframe) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  const n = Number(value).toFixed(2);
+  return timeframe ? `${n}%/${timeframe}` : `${n}%`;
+}
+
+function positionStatusEmoji(p) {
+  if (p.pnl_pct == null) return "⚪";
+  if (!p.in_range) return "🔴"; // OOR
+  if (p.pnl_pct >= 2) return "🟢"; // Good profit
+  if (p.pnl_pct >= 0) return "🟡"; // In range, neutral
+  if (p.pnl_pct >= -3) return "🟠"; // In range, small loss
+  return "🔴"; // In range, big loss
+}
+
+function feeTvlBar(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "";
+  const n = Number(value);
+  if (n < 1) return "▁";
+  if (n < 3) return "▂▁";
+  if (n < 6) return "▃▂▁";
+  if (n < 10) return "▄▃▂▁";
+  if (n < 20) return "▅▄▃▂▁";
+  return "▆▅▄▃▂▁";
 }
 
 

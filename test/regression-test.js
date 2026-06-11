@@ -1075,6 +1075,114 @@ function hasAcceleratingBoost(pool, accel = 10) {
 }
 
 
+// ─── SECTION 18: Management Cycle Display Helpers ──────────────────────────
+
+console.log("\n── Mgmt Display: fmtAge, fmtFeeTvl, positionStatusEmoji, feeTvlBar ──");
+
+function fmtAge(minutes) {
+  if (minutes == null || !Number.isFinite(minutes)) return "—";
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+function positionStatusEmoji(p) {
+  if (p.pnl_pct == null) return "⚪";
+  if (!p.in_range) return "🔴";
+  if (p.pnl_pct >= 2) return "🟢";
+  if (p.pnl_pct >= 0) return "🟡";
+  if (p.pnl_pct >= -3) return "🟠";
+  return "🔴";
+}
+
+function feeTvlBar(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "";
+  const n = Number(value);
+  if (n < 1) return "▁";
+  if (n < 3) return "▂▁";
+  if (n < 6) return "▃▂▁";
+  if (n < 10) return "▄▃▂▁";
+  if (n < 20) return "▅▄▃▂▁";
+  return "▆▅▄▃▂▁";
+}
+
+// fmtAge tests
+{
+  assertEquals(fmtAge(null), "—", "fmtAge: null → —");
+  assertEquals(fmtAge(undefined), "—", "fmtAge: undefined → —");
+  assertEquals(fmtAge(NaN), "—", "fmtAge: NaN → —");
+  assertEquals(fmtAge(0), "0m", "fmtAge: 0 → 0m");
+  assertEquals(fmtAge(45), "45m", "fmtAge: 45m");
+  assertEquals(fmtAge(59), "59m", "fmtAge: 59m (boundary)");
+  assertEquals(fmtAge(60), "1h", "fmtAge: 60m → 1h (no remainder)");
+  assertEquals(fmtAge(83), "1h 23m", "fmtAge: 83m → 1h 23m");
+  assertEquals(fmtAge(120), "2h", "fmtAge: 120m → 2h");
+  assertEquals(fmtAge(1439), "23h 59m", "fmtAge: 1439m → 23h 59m");
+  assertEquals(fmtAge(1440), "24h", "fmtAge: 1440m → 24h (1 day)");
+  assertEquals(fmtAge(1500), "25h", "fmtAge: 1500m → 25h");
+}
+
+// positionStatusEmoji tests
+{
+  // null pnl_pct → ⚪
+  assertEquals(positionStatusEmoji({ pnl_pct: null, in_range: true }), "⚪", "Status: null pnl → ⚪");
+  // OOR → 🔴
+  assertEquals(positionStatusEmoji({ pnl_pct: 5, in_range: false }), "🔴", "Status: OOR → 🔴");
+  assertEquals(positionStatusEmoji({ pnl_pct: -5, in_range: false }), "🔴", "Status: OOR + loss → 🔴");
+  // In range
+  assertEquals(positionStatusEmoji({ pnl_pct: 10, in_range: true }), "🟢", "Status: in range +5%+ → 🟢");
+  assertEquals(positionStatusEmoji({ pnl_pct: 2.0, in_range: true }), "🟢", "Status: in range +2% (boundary) → 🟢");
+  assertEquals(positionStatusEmoji({ pnl_pct: 1.9, in_range: true }), "🟡", "Status: in range +1.9% (just below) → 🟡");
+  assertEquals(positionStatusEmoji({ pnl_pct: 0, in_range: true }), "🟡", "Status: in range 0% → 🟡");
+  assertEquals(positionStatusEmoji({ pnl_pct: -1, in_range: true }), "🟠", "Status: in range -1% → 🟠");
+  assertEquals(positionStatusEmoji({ pnl_pct: -3, in_range: true }), "🟠", "Status: in range -3% (boundary) → 🟠");
+  assertEquals(positionStatusEmoji({ pnl_pct: -3.1, in_range: true }), "🔴", "Status: in range -3.1% (just below) → 🔴");
+  assertEquals(positionStatusEmoji({ pnl_pct: -10, in_range: true }), "🔴", "Status: in range -10% → 🔴");
+}
+
+// feeTvlBar tests
+{
+  assertEquals(feeTvlBar(null), "", "feeBar: null → empty");
+  assertEquals(feeTvlBar(undefined), "", "feeBar: undefined → empty");
+  assertEquals(feeTvlBar(NaN), "", "feeBar: NaN → empty");
+  assertEquals(feeTvlBar(0.5), "▁", "feeBar: 0.5% → ▁");
+  assertEquals(feeTvlBar(0.99), "▁", "feeBar: 0.99% → ▁ (just below 1)");
+  assertEquals(feeTvlBar(1), "▂▁", "feeBar: 1% → ▂▁");
+  assertEquals(feeTvlBar(2.9), "▂▁", "feeBar: 2.9% → ▂▁ (just below 3)");
+  assertEquals(feeTvlBar(3), "▃▂▁", "feeBar: 3% → ▃▂▁");
+  assertEquals(feeTvlBar(5.9), "▃▂▁", "feeBar: 5.9% → ▃▂▁ (just below 6)");
+  assertEquals(feeTvlBar(6), "▄▃▂▁", "feeBar: 6% → ▄▃▂▁");
+  assertEquals(feeTvlBar(9.9), "▄▃▂▁", "feeBar: 9.9% → ▄▃▂▁ (just below 10)");
+  assertEquals(feeTvlBar(10), "▅▄▃▂▁", "feeBar: 10% → ▅▄▃▂▁");
+  assertEquals(feeTvlBar(19.9), "▅▄▃▂▁", "feeBar: 19.9% → ▅▄▃▂▁ (just below 20)");
+  assertEquals(feeTvlBar(20), "▆▅▄▃▂▁", "feeBar: 20% → ▆▅▄▃▂▁ (max bar)");
+  assertEquals(feeTvlBar(100), "▆▅▄▃▂▁", "feeBar: 100% (capped at max bar)");
+}
+
+// Code structure: helpers exist in index.js
+{
+  const fs = await import("fs");
+  const { fileURLToPath } = await import("url");
+  const indexPath = fileURLToPath(new URL("../index.js", import.meta.url));
+  const indexSrc = fs.readFileSync(indexPath, "utf8");
+  assert(indexSrc.includes("function fmtAge"), "Index: fmtAge function exists");
+  assert(indexSrc.includes("function fmtFeeTvl"), "Index: fmtFeeTvl function exists");
+  assert(indexSrc.includes("function positionStatusEmoji"), "Index: positionStatusEmoji function exists");
+  assert(indexSrc.includes("function feeTvlBar"), "Index: feeTvlBar function exists");
+  // Verify management cycle uses new helpers
+  assert(indexSrc.includes("const statusEmoji = positionStatusEmoji(p)"), "Index: mgmt cycle uses positionStatusEmoji");
+  assert(indexSrc.includes("const feeBar = feeTvlBar(p.fee_per_tvl_24h)"), "Index: mgmt cycle uses feeTvlBar");
+  assert(indexSrc.includes("const ageStr = fmtAge(p.age_minutes)"), "Index: mgmt cycle uses fmtAge");
+  // Verify /positions also uses helpers
+  assert(indexSrc.match(/const feeStr24h = .+fee_per_tvl_24h.+24h/), "Index: /positions shows fee/TVL with /24h suffix");
+  // Verify timeframe labeling for yield
+  assert(indexSrc.includes("/24h"), "Index: yield shows /24h timeframe");
+  // Summary line has avg fee/TVL
+  assert(indexSrc.includes("Avg fee/TVL"), "Index: summary line includes avg fee/TVL");
+}
+
+
 // ─── SECTION 8: Jupiter — API key + health check ────────────────────────────
 
 console.log("\n── Jupiter: API key + health check ──");
