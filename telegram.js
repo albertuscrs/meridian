@@ -348,10 +348,13 @@ export async function createLiveMessage(title, intro = "Starting...") {
     flushRequested: false,
   };
 
+  // Rendered as Telegram HTML. Title/intro/tool lines are internal plain
+  // strings and get escaped here; footer must arrive already HTML-safe
+  // (callers escape dynamic content and may use tags like <b>).
   function render() {
-    const sections = [state.title];
-    if (state.intro) sections.push(state.intro);
-    if (state.toolLines.length > 0) sections.push(state.toolLines.join("\n"));
+    const sections = [escapeHtml(state.title)];
+    if (state.intro) sections.push(escapeHtml(state.intro));
+    if (state.toolLines.length > 0) sections.push(state.toolLines.map(escapeHtml).join("\n"));
     if (state.footer) sections.push(state.footer);
     return sections.join("\n\n").slice(0, 4096);
   }
@@ -361,11 +364,12 @@ export async function createLiveMessage(title, intro = "Starting...") {
     state.flushRequested = false;
     const text = render();
     if (!state.messageId) {
-      const sent = await sendMessage(text);
+      const sent = (await sendHTML(text)) || (await sendMessage(text));
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
-    await editMessage(text, state.messageId, undefined); // plain text — no HTML mode
+    const edited = await editMessage(text, state.messageId, "HTML");
+    if (!edited) await editMessage(text, state.messageId, undefined); // HTML parse failed — degrade to plain text
   }
 
   function scheduleFlush(delay = 300) {
@@ -420,7 +424,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
         state.flushTimer = null;
       }
       if (state.flushPromise) await state.flushPromise;
-      state.footer = `❌ ${errorText}`;
+      state.footer = `❌ ${escapeHtml(errorText)}`;
       await flushNow();
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();

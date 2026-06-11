@@ -874,8 +874,8 @@ IMPORTANT:
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${stripThink(screenReport)}`).catch(() => { });
+        if (liveMessage) await liveMessage.finalize(htmlEscape(stripThink(screenReport))).catch(() => {});
+        else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${htmlEscape(stripThink(screenReport))}`).catch(() => { });
       }
     }
   }
@@ -2585,10 +2585,10 @@ async function telegramHandler(msg) {
         const valueStr = `${cur}${(p.total_value_usd ?? 0).toFixed(3)}`;
         const unclaimedStr = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(3)}`;
         const statusEmoji = positionStatusEmoji(p);
-        const noteLine = p.instruction ? `\n   📝 "${p.instruction}"` : "";
+        const noteLine = p.instruction ? `\n   📝 "${htmlEscape(p.instruction)}"` : "";
 
         return [
-          `${statusEmoji} <b>${i + 1}. ${p.pair}</b> | ${p.strategy ?? "spot"}`,
+          `${statusEmoji} <b>${i + 1}. ${htmlEscape(p.pair)}</b> | ${p.strategy ?? "spot"}`,
           `   💰 ${valueStr} | PnL: ${pnlPctStr} (${pnlUsdStr})`,
           `   📍 ${rangeEmoji} ${rangeLabel} | ⏱ ${ageStr}`,
           `   📈 ${feeStr24h} | 📥 ${unclaimedStr} unclaimed`,
@@ -2893,7 +2893,7 @@ async function telegramHandler(msg) {
       onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
     });
     appendHistory(text, content);
-    if (liveMessage) await liveMessage.finalize(stripThink(content));
+    if (liveMessage) await liveMessage.finalize(htmlEscape(stripThink(content)));
     else await sendMessage(stripThink(content));
   } catch (e) {
     if (liveMessage) await liveMessage.fail(e.message).catch(() => {});
