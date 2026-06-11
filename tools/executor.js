@@ -590,11 +590,6 @@ const toolMap = {
       return { success: false, unknown, reason };
     }
 
-    if (Object.keys(applied).length === 0) {
-      log("config", `update_config failed — unknown keys: ${JSON.stringify(unknown)}, raw changes: ${JSON.stringify(changes)}`);
-      return { success: false, unknown, reason };
-    }
-
     let userConfig = {};
     if (fs.existsSync(USER_CONFIG_PATH)) {
       try {

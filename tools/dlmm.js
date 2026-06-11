@@ -817,7 +817,7 @@ export async function deployPosition({
           pool: pool_address,
           pool_name,
           strategy: activeStrategy,
-          bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: intendedBinsAbove },
+          bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
           bin_step,
           volatility: normalizedVolatility,
           fee_tvl_ratio,
