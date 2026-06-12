@@ -626,6 +626,7 @@ Format: `**YYYY-MM-DD** — Brief description (commit hash)`
 - **2026-06-08** — Screening "no tool call was made" error fix: Added `allowSkip` option to `agentLoop` in agent.js. When `allowSkip: true` is passed, `mustUseRealTool` is disabled, allowing the model to return text when it decides to skip a cycle. The screening goal explicitly says "If no pool qualifies, report ⛔ NO DEPLOY" but the MUTATING_TOOL_INTENTS regex was forcing the model to call a tool (rejecting the text response). Index.js SCREENER call now passes `allowSkip: true`. 180/180 regression tests pass, bot restarted.
 - **2026-06-10** — Volume Trend Acceleration classification: Classifies pools by `volume_change_pct` into `accelerating` (>10) / `stable` (-10 to 10) / `decelerating` (<-10) / `unknown` (null). Data-validated: ALL catastrophic losses cluster in "decelerating" pools (111 positions, -0.23% avg PnL). "Accelerating" pools get +100 score boost. GMGN enrichment: 1 API call per GMGN pool to fetch Meteora pool detail (GMGN pipeline doesn't expose `volume_change_pct`). 4 config keys: `volumeTrendFilter`, `volumeTrendAccelThreshold` (10), `volumeTrendDecelThreshold` (-10), `volumeTrendBlockDecel` (false — LLM decides). Deploy validation re-check. `/settings` Telegram buttons. 37 new regression tests, 217/217 total pass, bot restarted.
 - **2026-06-11** — Management cycle display improvements: 4 new helper functions in `index.js` — `fmtAge` (formats `83m` → `1h 23m`, `1440m` → `24h`), `fmtFeeTvl` (yield with `/24h` suffix), `positionStatusEmoji` (5-level: ⚪/🟢/🟡/🟠/🔴), `feeTvlBar` (visual bar `▁▂▃▄▅▆` based on yield magnitude). Multi-line layout per position: status emoji, value/PnL, range/age, fee/unclaimed, OOR/IN status. Summary line adds profitable+OOR counts + avg fee/TVL/24h. Applied to both management cycle report and `/positions` command. 48 new regression tests, 265/265 pass, bot restarted.
+- **2026-06-12** — Upstream merge: RPC PnL + GMGN fee source. 5 commits integrated: `905305b` (RPC-derived PnL poller via Meteora DLMM SDK on pump.helius-rpc.com + GMGN fee source with auto-fallback to Jupiter), `eaa7c71` (fix: base pnl_pct_suspicious on input validity), `343ad5a` (fix: honor pnl_pct_suspicious in getDeterministicCloseRule), `0e02421` (relay poll label + debug log), `771928a` (replace flood pnl_tick log with 60s heartbeat). 8 conflict files resolved (config.js, index.js, lessons.js, briefing.js, tools/dlmm.js, tools/executor.js, tools/token.js, tools/gmgn.js). Kept all local features (Fee Drift, Time-of-Day, Volume Trend, OPERATOR_ONLY_KEYS, PnL Poll Gap fix, evaluateAndSetCooldown call, etc.). LPAgent relay removed from PnL primary path. New config keys: `pnlSource` (rpc/meteora), `pnlRpcUrl`, `pnlPollIntervalSec` (3s), `pnlDepositCacheTtlSec` (300s), `gmgnFeeSource` (gmgn/jupiter). 265/265 regression tests pass, bot restarted with `[POSITIONS] Computing PnL from RPC (https://pump.helius-rpc.com)...` confirmed working.
 
 ### Diverged Commits
 
@@ -949,6 +950,65 @@ Skip deploy if token age < 24 hours AND current hour is in high-risk window (00-
 ```
 
 **Files:** `index.js` (helpers + display logic), `test/regression-test.js` (48 new tests).
+
+### S4: Upstream RPC PnL + GMGN Fee Source ✅ MERGED (2026-06-12)
+
+**Upstream commits merged (5 total):**
+- `905305b` — RPC-derived PnL poller + GMGN fee source (10 files, 368 insertions, 51 deletions)
+- `eaa7c71` — fix: base pnl_pct_suspicious on input validity
+- `343ad5a` — fix: honor pnl_pct_suspicious in getDeterministicCloseRule
+- `0e02421` — fix: relay poll label + debug log
+- `771928a` — fix: replace flood pnl_tick log with 60s heartbeat
+
+**New features integrated:**
+
+**RPC PnL (`tools/pnl.js` new file, 272 lines):**
+- Live position value computed on-chain via Meteora DLMM SDK on `pump.helius-rpc.com`
+- Deposit history (cost basis, withdrawals, claimed fees) from Meteora `/pnl` API, cached with signature invalidation
+- Token prices from Jupiter (never cached, always fresh)
+- Zero dependency on LPAgent / agentmeridian.xyz relay for PnL
+- `pnlPollIntervalSec` configurable (default 3s)
+
+**Smarter Exit Guard (`pnl_pct_suspicious`):**
+- Stop-loss / trailing TP suppressed when tick can't be priced (Jupiter outage, missing deposits)
+- Prevents false exits during API downtime — OOR and low-yield rules still fire normally
+- `getDeterministicCloseRule` honors the suspicious flag
+
+**GMGN as Fee Source (`tools/gmgn.js` + `tools/token.js`):**
+- `minTokenFeesSol` gate now uses GMGN `total_fee` (more accurate than Jupiter `t.fees`)
+- Auto-fallback to Jupiter when no GMGN key or API error
+- `token.js` `global_fees_sol` resolves from GMGN
+
+**New config keys (`pnl` + `gmgn.feeSource`):**
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `pnlSource` | `"rpc"` | `rpc` (on-chain) or `meteora` (API fallback) |
+| `pnlRpcUrl` | `https://pump.helius-rpc.com` | Any Solana RPC endpoint |
+| `pnlPollIntervalSec` | `3` | How often poller checks positions |
+| `pnlDepositCacheTtlSec` | `300` | Cache TTL for deposit history |
+| `gmgnFeeSource` | `"gmgn"` | `gmgn` (with key) or `jupiter` |
+
+**8 conflict files resolved:**
+- `config.js` — kept local Fee Drift / Time-of-Day / Volume Trend keys
+- `index.js` — kept local display helpers (fmtAge, feeTvlBar, etc.)
+- `lessons.js` — kept `evaluateAndSetCooldown` call (upstream removed it; critical for cooldown logic)
+- `briefing.js` — kept `htmlEscape` function
+- `tools/dlmm.js` — removed LPAgent relay path (per upstream)
+- `tools/executor.js` — kept OPERATOR_ONLY_KEYS + all local CONFIG_MAP entries
+- `tools/gmgn.js` — auto-merged
+- `tools/token.js` — kept GMGN `global_fees_sol` refinement
+
+**Live verification after restart:**
+```
+[POSITIONS] Computing PnL from RPC (https://pump.helius-rpc.com)...
+[GMGN] Stage1 rank: 89 → 4 pass
+[PNL_TICK] poller alive — 0 position(s) tracked (tick #1)
+[CRON] Cycles started — management every 3m, screening every 5m
+[TELEGRAM] Bot polling started
+[TELEGRAM] Registered 28 bot commands
+```
+
+**Files:** `tools/pnl.js` (new, 272 lines), `config.js`, `tools/dlmm.js`, `tools/gmgn.js`, `tools/token.js`, `tools/executor.js`, `index.js`, `state.js`, `lessons.js`, `briefing.js`, `gmgn-config.example.json`, `user-config.example.json`
 
 ### M3: Log Rotation ✅ DONE (2026-05-23)**Implementation:** `rotateOldLogs()` in `logger.js` — deletes log files older than 7 days. Runs at startup. Cleans `agent-*.log`, `actions-*.jsonl`, `snapshots-*.jsonl`.
 

@@ -359,7 +359,7 @@ No longer spams screening every 3 minutes when no positions open.
 
 ---
 
-## Session Notes (2026-05-23 to 2026-06-11)
+## Session Notes (2026-05-23 to 2026-06-12)
 
 ### What Was Done
 
@@ -443,6 +443,8 @@ No longer spams screening every 3 minutes when no positions open.
 8. **Surgical upstream merge for massive refactor** — `5fae0c5` (612 deletions, 333 additions) conflicted in 5 files with our local R-implementations. Resolved manually keeping all local features (Fee Drift CONFIG_MAP, OPERATOR_ONLY_KEYS, displayPnlPct, maxVolatility evolution). 8 conflict files resolved in ~30 min.
 
 9. **Visual management display helpers** — `fmtAge` (formats `83m` → `1h 23m`), `positionStatusEmoji` (5-level status: ⚪/🟢/🟡/🟠/🔴), `feeTvlBar` (visual bar `▁▂▃▄▅▆` based on yield magnitude). Multi-line layout per position makes mgmt cycle reports scannable in Telegram. User asked for "more intuitive" — 4 helpers + 48 regression tests (265/265 pass) in 173-line change.
+
+10. **Upstream RPC PnL + GMGN fee source merge** — 5 upstream commits (905305b + 4 fixes) integrated in single merge. 8 conflict files (config.js, index.js, lessons.js, briefing.js, tools/dlmm.js, tools/executor.js, tools/gmgn.js, tools/token.js). Key kept-local: `evaluateAndSetCooldown` call in lessons.js (upstream removed it → cooldown logic broken upstream). RPC PnL uses Meteora DLMM SDK on public RPC, no LPAgent dependency. New config keys: `pnlSource`, `pnlRpcUrl`, `pnlPollIntervalSec`, `pnlDepositCacheTtlSec`, `gmgnFeeSource`.
 
 ---
 
