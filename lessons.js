@@ -424,6 +424,7 @@ export function evolveThresholds(perfData, config) {
   }
 
   // ── 2. minFeeActiveTvlRatio ────────────────────────────────────
+  // ── 2. minFeeActiveTvlRatio ────────────────────────────────────
   // Raise the floor if low-fee pools consistently underperform.
   {
     const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
