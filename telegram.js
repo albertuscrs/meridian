@@ -20,6 +20,12 @@ let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
 
+const CHAT_ACTION_DEDUP_MS = 5000;
+const CHAT_ACTION_BASE_INTERVAL_MS = 5000;
+const CHAT_ACTION_BACKOFF_MAX_MS = 30000;
+let _lastChatActionSentTs = 0;
+let _chatActionBackoffMs = CHAT_ACTION_BASE_INTERVAL_MS;
+
 function nonEmptyChatId(value) {
   if (value == null) return null;
   const trimmed = String(value).trim();
@@ -111,7 +117,8 @@ export function isEnabled() {
 
 export async function sendHTML(html) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
+  const result = await postTelegramWithRetry("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
+  return result?.data ?? null;
 }
 
 function escapeHtml(str) {
@@ -120,54 +127,6 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-
-async function postTelegram(method, body) {
-  if (!TOKEN || !chatId) return null;
-  try {
-    const res = await fetch(`${BASE}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, ...body }),
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      if (res.status === 401) {
-        log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
-      } else {
-        log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
-      }
-      return null;
-    }
-    return await res.json();
-  } catch (e) {
-    log("telegram_error", `${method} failed: ${e.message}`);
-    return null;
-  }
-}
-
-async function postTelegramRaw(method, body) {
-  if (!TOKEN) return null;
-  try {
-    const res = await fetch(`${BASE}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      if (res.status === 401) {
-        log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
-      } else {
-        log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
-      }
-      return null;
-    }
-    return await res.json();
-  } catch (e) {
-    log("telegram_error", `${method} failed: ${e.message}`);
-    return null;
-  }
 }
 
 const BOT_COMMANDS = [
@@ -203,8 +162,8 @@ const BOT_COMMANDS = [
 
 export async function registerBotCommands() {
   if (!TOKEN) return;
-  const result = await postTelegramRaw("setMyCommands", { commands: BOT_COMMANDS });
-  if (result?.ok) {
+  const result = await postTelegramStatus("setMyCommands", { commands: BOT_COMMANDS }, { requireChatId: false });
+  if (result?.ok && result.data?.ok) {
     log("telegram", `Registered ${BOT_COMMANDS.length} bot commands`);
   } else {
     log("telegram_error", `setMyCommands failed: ${JSON.stringify(result)}`);
@@ -214,45 +173,130 @@ export async function registerBotCommands() {
 
 export async function sendMessage(text) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: String(text).slice(0, 4096) });
+  const result = await postTelegramWithRetry("sendMessage", { text: String(text).slice(0, 4096) });
+  return result?.data ?? null;
 }
 
 export async function sendMessageWithButtons(text, inlineKeyboard) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", {
+  const result = await postTelegramWithRetry("sendMessage", {
     text: String(text).slice(0, 4096),
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
+  return result?.data ?? null;
 }
 
 export async function editMessage(text, messageId, parseMode) {
   if (!TOKEN || !chatId || !messageId) return null;
-  return postTelegram("editMessageText", {
+  const result = await postTelegramStatus("editMessageText", {
     message_id: messageId,
     text: String(text).slice(0, 4096),
     ...(parseMode ? { parse_mode: parseMode } : {}),
   });
+  return result?.data ?? null;
 }
 
 export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
   if (!TOKEN || !chatId || !messageId) return null;
-  return postTelegram("editMessageText", {
+  const result = await postTelegramStatus("editMessageText", {
     message_id: messageId,
     text: String(text).slice(0, 4096),
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
+  return result?.data ?? null;
 }
 
 export async function answerCallbackQuery(callbackQueryId, text = "") {
   if (!TOKEN || !callbackQueryId) return null;
-  return postTelegramRaw("answerCallbackQuery", {
+  const result = await postTelegramStatus("answerCallbackQuery", {
     callback_query_id: callbackQueryId,
     ...(text ? { text: String(text).slice(0, 200) } : {}),
-  });
+  }, { requireChatId: false });
+  return result?.data ?? null;
 }
 
 export function hasActiveLiveMessage() {
   return _liveMessageDepth > 0;
+}
+
+export function _resetChatActionStateForTests() {
+  _lastChatActionSentTs = 0;
+  _chatActionBackoffMs = CHAT_ACTION_BASE_INTERVAL_MS;
+}
+
+const RETRYABLE_5XX_STATUS = new Set([429, 500, 502, 503, 504]);
+function isRetryableStatus(status) {
+  return RETRYABLE_5XX_STATUS.has(status);
+}
+
+async function postTelegramStatus(method, body, { requireChatId = true } = {}) {
+  if (!TOKEN) return { ok: false, status: null, data: null };
+  if (requireChatId && !chatId) return { ok: false, status: null, data: null };
+  try {
+    const res = await fetch(`${BASE}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requireChatId ? { chat_id: chatId, ...body } : body),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => "");
+      if (res.status === 401) {
+        log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
+      } else {
+        log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+      }
+      return { ok: false, status: res.status, data: null };
+    }
+    const data = await res.json().catch(() => null);
+    return { ok: true, status: res.status, data };
+  } catch (e) {
+    log("telegram_error", `${method} failed: ${e.message}`);
+    return { ok: false, status: null, data: null };
+  }
+}
+
+const RETRY_METHODS = new Set(["sendMessage"]);
+async function postTelegramWithRetry(method, body, { maxAttempts = 2, retryDelayMs = 750 } = {}) {
+  if (!RETRY_METHODS.has(method)) {
+    return postTelegramStatus(method, body);
+  }
+  let attempt = 0;
+  let lastResult = null;
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    lastResult = await postTelegramStatus(method, body);
+    if (lastResult.ok) return lastResult;
+    if (attempt < maxAttempts && lastResult.status != null && isRetryableStatus(lastResult.status)) {
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+      continue;
+    }
+    return lastResult;
+  }
+  return lastResult;
+}
+
+async function trySendChatAction() {
+  if (!TOKEN || !chatId) return { sent: false, nextIntervalMs: _chatActionBackoffMs };
+  const now = Date.now();
+  if (_lastChatActionSentTs > 0 && now - _lastChatActionSentTs < CHAT_ACTION_DEDUP_MS) {
+    return { sent: false, nextIntervalMs: _chatActionBackoffMs };
+  }
+  const res = await fetch(`${BASE}/sendChatAction`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+  });
+  if (res.ok) {
+    _lastChatActionSentTs = Date.now();
+    _chatActionBackoffMs = CHAT_ACTION_BASE_INTERVAL_MS;
+    return { sent: true, nextIntervalMs: _chatActionBackoffMs };
+  }
+  const err = await res.text().catch(() => "");
+  log("telegram_error", `sendChatAction ${res.status}: ${err.slice(0, 200)}`);
+  if (isRetryableStatus(res.status)) {
+    _chatActionBackoffMs = Math.min(_chatActionBackoffMs * 2, CHAT_ACTION_BACKOFF_MAX_MS);
+  }
+  return { sent: false, nextIntervalMs: _chatActionBackoffMs };
 }
 
 function createTypingIndicator() {
@@ -265,10 +309,15 @@ function createTypingIndicator() {
 
   async function tick() {
     if (stopped) return;
-    await postTelegram("sendChatAction", { action: "typing" });
+    const { sent, nextIntervalMs } = await trySendChatAction();
+    if (stopped) return;
     timer = setTimeout(() => {
+      timer = null;
       tick().catch(() => null);
-    }, 4000);
+    }, nextIntervalMs);
+    if (!sent) {
+      log("telegram_debug", `sendChatAction skipped/dropped — next retry in ${nextIntervalMs}ms`);
+    }
   }
 
   tick().catch(() => null);

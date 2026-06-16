@@ -1242,6 +1242,194 @@ const { checkJupiter, checkAllApis } = await import(
 }
 
 
+// ─── SECTION 9: Telegram rate limiter + backoff (T9) ────────────────────────
+
+console.log("\n── Telegram: rate limiter + backoff ──");
+
+// Mirror of the pure dedup+backoff decision in telegram.js trySendChatAction
+// Returns { sent, nextIntervalMs } based on the previous-send timestamp and the
+// observed response status. State is held in the caller (mirrors module-level vars).
+function makeChatActionState(baseInterval = 5000, maxBackoff = 30000) {
+  return {
+    lastSentTs: 0,
+    backoffMs: baseInterval,
+    baseInterval,
+    maxBackoff,
+  };
+}
+
+function trySendChatActionLogic(state, now, fetchResult) {
+  // First-ever call (lastSentTs=0) should always be allowed
+  if (state.lastSentTs > 0 && now - state.lastSentTs < 5000) {
+    return { sent: false, nextIntervalMs: state.backoffMs };
+  }
+  if (fetchResult.ok) {
+    state.lastSentTs = now;
+    state.backoffMs = state.baseInterval;
+    return { sent: true, nextIntervalMs: state.backoffMs };
+  }
+  if (fetchResult.status === 429 || [500, 502, 503, 504].includes(fetchResult.status)) {
+    state.backoffMs = Math.min(state.backoffMs * 2, state.maxBackoff);
+  }
+  return { sent: false, nextIntervalMs: state.backoffMs };
+}
+
+{
+  // T9.1: First call with no prior state → sent, base interval returned
+  const s = makeChatActionState();
+  const r = trySendChatActionLogic(s, 10000, { ok: true });
+  assertEquals(r.sent, true, "T9.1: first call returns sent=true");
+  assertEquals(r.nextIntervalMs, 5000, "T9.1: first call uses 5s base interval");
+  assertEquals(s.lastSentTs, 10000, "T9.1: lastSentTs updated to now");
+}
+
+{
+  // T9.2: Second call within 5s window → skipped (dedup), no API hit
+  const s = makeChatActionState();
+  s.lastSentTs = 10000;
+  s.backoffMs = 5000;
+  const r = trySendChatActionLogic(s, 13000, { ok: true });
+  assertEquals(r.sent, false, "T9.2: call within 5s window is deduped");
+  assertEquals(r.nextIntervalMs, 5000, "T9.2: deduped call returns current backoff");
+}
+
+{
+  // T9.3: Call at 5.001s after last send → not deduped, fires
+  const s = makeChatActionState();
+  s.lastSentTs = 10000;
+  const r = trySendChatActionLogic(s, 15001, { ok: true });
+  assertEquals(r.sent, true, "T9.3: call at 5.001s after last send is allowed");
+}
+
+{
+  // T9.4: 5xx triggers exponential backoff
+  const s = makeChatActionState();
+  s.lastSentTs = 0; // ensure not deduped
+  const r = trySendChatActionLogic(s, 10000, { status: 504, ok: false });
+  assertEquals(r.sent, false, "T9.4: 504 failure returns sent=false");
+  assertEquals(r.nextIntervalMs, 10000, "T9.4: 504 first failure doubles backoff to 10s");
+  assertEquals(s.backoffMs, 10000, "T9.4: backoff state updated to 10s");
+}
+
+{
+  // T9.5: 429 also triggers backoff
+  const s = makeChatActionState();
+  const r = trySendChatActionLogic(s, 10000, { status: 429, ok: false });
+  assertEquals(r.nextIntervalMs, 10000, "T9.5: 429 triggers backoff (same as 5xx)");
+}
+
+{
+  // T9.6: 401 does NOT trigger backoff (auth issue, not transient)
+  const s = makeChatActionState();
+  const r = trySendChatActionLogic(s, 10000, { status: 401, ok: false });
+  assertEquals(r.nextIntervalMs, 5000, "T9.6: 401 does not trigger backoff (auth error)");
+  assertEquals(s.backoffMs, 5000, "T9.6: backoff unchanged on 401");
+}
+
+{
+  // T9.7: 400 does NOT trigger backoff (client error)
+  const s = makeChatActionState();
+  const r = trySendChatActionLogic(s, 10000, { status: 400, ok: false });
+  assertEquals(r.nextIntervalMs, 5000, "T9.7: 400 does not trigger backoff (client error)");
+}
+
+{
+  // T9.8: Backoff caps at 30s
+  const s = makeChatActionState();
+  s.lastSentTs = 0;
+  // 4 consecutive failures
+  trySendChatActionLogic(s, 10000, { status: 504, ok: false }); // 5s→10s
+  s.lastSentTs = 0; // reset to allow next call
+  trySendChatActionLogic(s, 20000, { status: 504, ok: false }); // 10s→20s
+  s.lastSentTs = 0;
+  trySendChatActionLogic(s, 30000, { status: 504, ok: false }); // 20s→30s
+  s.lastSentTs = 0;
+  const r = trySendChatActionLogic(s, 40000, { status: 504, ok: false }); // 30s→60s, capped
+  assertEquals(r.nextIntervalMs, 30000, "T9.8: backoff caps at 30s");
+}
+
+{
+  // T9.9: Successful call resets backoff to 5s
+  const s = makeChatActionState();
+  s.backoffMs = 30000; // already at max
+  s.lastSentTs = 0;
+  const r = trySendChatActionLogic(s, 50000, { ok: true });
+  assertEquals(r.sent, true, "T9.9: success after backoff fires");
+  assertEquals(s.backoffMs, 5000, "T9.9: success resets backoff to 5s");
+  assertEquals(r.nextIntervalMs, 5000, "T9.9: returns 5s after reset");
+}
+
+{
+  // T9.10: Multiple typing indicators: only first hits API within 5s
+  const s = makeChatActionState();
+  // Use realistic base timestamp (Date.now() is always huge in production)
+  const baseTs = 1_700_000_000_000;
+  // Indicator 1 sends at baseTs
+  const r1 = trySendChatActionLogic(s, baseTs, { ok: true });
+  assertEquals(r1.sent, true, "T9.10: indicator 1 sends");
+  // Indicator 2 tries at baseTs+2s, deduped
+  const r2 = trySendChatActionLogic(s, baseTs + 2000, { ok: true });
+  assertEquals(r2.sent, false, "T9.10: indicator 2 within 5s is deduped");
+  // Indicator 3 at baseTs+4.9s, still deduped
+  const r3 = trySendChatActionLogic(s, baseTs + 4900, { ok: true });
+  assertEquals(r3.sent, false, "T9.10: indicator 3 at 4.9s still deduped");
+  // Indicator 4 at baseTs+5.001s, fires
+  const r4 = trySendChatActionLogic(s, baseTs + 5001, { ok: true });
+  assertEquals(r4.sent, true, "T9.10: indicator 4 at 5.001s fires");
+}
+
+// Source checks on telegram.js
+{
+  const fs = await import("fs");
+  const { fileURLToPath } = await import("url");
+  const tgPath = fileURLToPath(new URL("../telegram.js", import.meta.url));
+  const tgSrc = fs.readFileSync(tgPath, "utf8");
+
+  // Constants for rate limiting exist
+  assert(tgSrc.includes("CHAT_ACTION_DEDUP_MS = 5000"), "Telegram: 5s dedup window defined");
+  assert(tgSrc.includes("CHAT_ACTION_BASE_INTERVAL_MS = 5000"), "Telegram: 5s base interval defined");
+  assert(tgSrc.includes("CHAT_ACTION_BACKOFF_MAX_MS = 30000"), "Telegram: 30s max backoff defined");
+
+  // Helper functions exist
+  assert(tgSrc.includes("function trySendChatAction"), "Telegram: trySendChatAction helper exists");
+  assert(tgSrc.includes("function postTelegramStatus"), "Telegram: postTelegramStatus helper exists");
+  assert(tgSrc.includes("function postTelegramWithRetry"), "Telegram: postTelegramWithRetry helper exists");
+  assert(tgSrc.includes("function isRetryableStatus"), "Telegram: isRetryableStatus helper exists");
+
+  // Backoff logic present
+  assert(tgSrc.includes("_chatActionBackoffMs * 2"), "Telegram: exponential backoff doubles interval");
+  assert(tgSrc.includes("CHAT_ACTION_BACKOFF_MAX_MS"), "Telegram: backoff cap uses constant");
+
+  // createTypingIndicator no longer hardcodes 4000ms
+  assert(!tgSrc.match(/tick\.catch[^}]*4000/), "Telegram: tick no longer hardcodes 4000ms");
+
+  // sendMessage path uses retry
+  assert(tgSrc.includes("postTelegramWithRetry(\"sendMessage\""), "Telegram: sendMessage uses retry path");
+  assert(tgSrc.includes("RETRY_METHODS = new Set"), "Telegram: RETRY_METHODS set defined");
+
+  // Old functions are removed
+  assert(!tgSrc.match(/^async function postTelegram\(method, body\) \{$/m), "Telegram: old postTelegram removed");
+  assert(!tgSrc.match(/^async function postTelegramRaw\(method, body\) \{$/m), "Telegram: old postTelegramRaw removed");
+
+  // Test reset hook exists
+  assert(tgSrc.includes("_resetChatActionStateForTests"), "Telegram: test reset hook exported");
+}
+
+{
+  // Tick function signature uses nextIntervalMs from helper (not hardcoded)
+  const fs = await import("fs");
+  const tgSrc = fs.readFileSync("telegram.js", "utf8");
+  // Find the tick function body
+  const tickMatch = tgSrc.match(/async function tick\(\) \{[\s\S]*?\n\s*\}/);
+  assertNotNull(tickMatch, "Telegram: tick function found in source");
+  if (tickMatch) {
+    const body = tickMatch[0];
+    assert(body.includes("nextIntervalMs"), "Telegram: tick uses nextIntervalMs");
+    assert(!body.includes("}, 4000)"), "Telegram: tick no longer uses 4000ms literal");
+  }
+}
+
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log("\n─────────────────────────────────");

@@ -50,8 +50,10 @@ Branch: experimental. Bot is running live on VM ubuntu@VM-0-3-ubuntu at /home/ub
 - 1e053a2 (drop 15m timeframe) cherry-picked
 - 5fae0c5 (entry/exit learning, HiveMind market push, OKX removal, setup overhaul) cherry-picked
 - 8 conflict files resolved manually keeping all local R-implementations
+- 905305b + 4 fixes (RPC PnL, GMGN fee source, pnl_pct_suspicious, pnl_tick heartbeat) merged 2026-06-12
+- Telegram 504 rate-limit fix (S5) — 5s dedup, exp backoff, 1-retry on 5xx, 38 new tests
 
-**Tests:** 265 regression tests in test/regression-test.js (all passing)
+**Tests:** 303 regression tests in test/regression-test.js (1 pre-existing failure: emergencyClosePct = -10 test vs user-config override -21)
 
 ## Current config
 

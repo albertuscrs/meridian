@@ -321,6 +321,7 @@ Run: `node test/regression-test.js`
 | R8 Indicator-Aware | 6 | hold/close/fail-open/profile guard/trailing bypass |
 | R5 Low Yield | 4 | age gate, custom minAgeBeforeYieldCheck |
 | F1 signal-tracker | 7 | pool lookup, base_mint fallback, clear-after-retrieval |
+| Telegram rate limiter | 38 | 5s dedup, exp backoff, 1-retry, 401/400 no-backoff, cap at 30s |
 
 Also: `test/pool-cooldown-test.js` (6 cooldown scenarios), `test/test-solmode-pnl.js` (SOL mode PnL).
 
@@ -359,7 +360,7 @@ No longer spams screening every 3 minutes when no positions open.
 
 ---
 
-## Session Notes (2026-05-23 to 2026-06-12)
+## Session Notes (2026-05-23 to 2026-06-16)
 
 ### What Was Done
 
@@ -408,6 +409,14 @@ No longer spams screening every 3 minutes when no positions open.
 **Upstream Merge**
 - 3 commits: auto-register Telegram commands, DeepSeek thinking mode fix, false volume=0 screening fix
 
+**Telegram 504 Rate-Limit Fix (S5)**
+- Root cause: `createTypingIndicator` self-rescheduled `sendChatAction` every 4s with no dedup
+- Multiple concurrent indicators (management + ad-hoc) flooded Telegram → 504 cascade on `sendMessage` too
+- Fix: 5s dedup window, exponential backoff (5→10→20→30s cap), 1-retry on 5xx for `sendMessage`
+- 38 new regression tests (T9.1-T9.10 + source checks) — total 303/304 pass
+- Files: `telegram.js` (+~100 LOC), `test/regression-test.js` (+~200 LOC)
+- Helper exports `_resetChatActionStateForTests` for unit test isolation
+
 ### What to Avoid
 
 1. **Never use `numberOrNull` in `screening.js`** — that function only exists in `executor.js`. Use `numeric()` which is already defined in `screening.js`.
@@ -442,15 +451,17 @@ No longer spams screening every 3 minutes when no positions open.
 
 8. **Surgical upstream merge for massive refactor** — `5fae0c5` (612 deletions, 333 additions) conflicted in 5 files with our local R-implementations. Resolved manually keeping all local features (Fee Drift CONFIG_MAP, OPERATOR_ONLY_KEYS, displayPnlPct, maxVolatility evolution). 8 conflict files resolved in ~30 min.
 
-9. **Visual management display helpers** — `fmtAge` (formats `83m` → `1h 23m`), `positionStatusEmoji` (5-level status: ⚪/🟢/🟡/🟠/🔴), `feeTvlBar` (visual bar `▁▂▃▄▅▆` based on yield magnitude). Multi-line layout per position makes mgmt cycle reports scannable in Telegram. User asked for "more intuitive" — 4 helpers + 48 regression tests (265/265 pass) in 173-line change.
+9. **Visual management display helpers** — `fmtAge` (formats `83m` → `1h 23m`), `positionStatusEmoji` (5-level status: ⚪/🟢/🟡/🟠/🔴), `feeTvlBar` (visual bar `▁▂▃▄▅▆` based on yield magnitude). Multi-line layout per position makes mgmt cycle reports scannable in Telegram. User asked for "more intuitive" — 4 helpers + 48 regression tests (303/304 pass) in 173-line change.
 
 10. **Upstream RPC PnL + GMGN fee source merge** — 5 upstream commits (905305b + 4 fixes) integrated in single merge. 8 conflict files (config.js, index.js, lessons.js, briefing.js, tools/dlmm.js, tools/executor.js, tools/gmgn.js, tools/token.js). Key kept-local: `evaluateAndSetCooldown` call in lessons.js (upstream removed it → cooldown logic broken upstream). RPC PnL uses Meteora DLMM SDK on public RPC, no LPAgent dependency. New config keys: `pnlSource`, `pnlRpcUrl`, `pnlPollIntervalSec`, `pnlDepositCacheTtlSec`, `gmgnFeeSource`.
+
+11. **Telegram 504 rate-limit fix (S5)** — User diagnosed root cause instantly (`sendChatAction` flooding). `createTypingIndicator` self-rescheduled every 4s with no dedup. When multiple indicators overlap (management + ad-hoc), bot floods Telegram with 1-2 calls/sec → 504 cascade. Fix: 5s dedup window, exponential backoff (5s→10s→20s→30s cap), 1-retry on 5xx for `sendMessage`. 38 new tests covering dedup, backoff, retry logic, status classification. Net +39 tests (265→303/304). User's hypothesis was the smoking gun — they nailed it in one sentence.
 
 ---
 
 ## Regression Tests (Updated)
 
-`test/regression-test.js` — 265 inline unit tests.
+`test/regression-test.js` — 303 inline unit tests.
 Run: `node test/regression-test.js`
 
 | Test group | Cases | What it covers |
@@ -473,3 +484,4 @@ Run: `node test/regression-test.js`
 | Agent allowSkip | 4 | option, signature, mustUseRealTool bypass |
 | Volume Trend | 37 | classification, custom thresholds, score boost, deploy validation, code structure |
 | Mgmt Display | 48 | fmtAge (1h 23m format), positionStatusEmoji (5-level), feeTvlBar (6 tiers), yield with /24h |
+| Telegram rate limiter | 38 | 5s dedup, exp backoff, 1-retry, 401/400 no-backoff, cap at 30s, multi-indicator dedup |

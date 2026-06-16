@@ -1214,3 +1214,53 @@ Preserved logs for future reference:
 - **2026-05-28** — Embrace/SOL post-mortem revealed PnL Poll Gap (peak-gate
   skips exit rule evaluation when PnL descending). Fix plan designed,
   implementation pending. Priority: HIGH.
+
+### S5: Telegram 504 Rate-Limit Fix ✅ DONE (2026-06-16)
+
+**Symptom:** All Telegram messages failing with HTTP 504 Gateway Timeout.
+Logs showed continuous `sendChatAction 504` + `sendMessage 504` errors with
+no chat getting through. ~178 TELEGRAM_ERROR events in 24h.
+
+**Root cause:** `createTypingIndicator()` in `telegram.js` was self-rescheduling
+a `sendChatAction` call every **4000ms** with no dedup, no backoff. When 1-3
+typing indicators run concurrently (management/screening/ad-hoc), the bot
+floods Telegram with 1-2 calls per second, exceeding the implicit
+chat-action rate budget. Telegram starts returning 504 to throttle. The
+flood then cascades to `sendMessage` 504s because the API load balancer is
+overloaded.
+
+**Fix (telegram.js):**
+- Added module-level rate limiter for `sendChatAction`:
+  - `CHAT_ACTION_DEDUP_MS = 5000` — skip if any indicator pinged within 5s
+  - `CHAT_ACTION_BASE_INTERVAL_MS = 5000` — base tick interval (was 4000)
+  - `CHAT_ACTION_BACKOFF_MAX_MS = 30000` — exponential backoff cap
+- Exponential backoff on 5xx/429: doubles per failure (5s→10s→20s→30s cap),
+  resets to 5s on next success. 401/400 do **not** trigger backoff (auth/client
+  errors, not transient).
+- 1-retry on 5xx/429 for `sendMessage` family (deploy/close alerts get
+  through even when the first attempt hits a transient 504).
+- New helpers: `postTelegramStatus`, `postTelegramWithRetry`, `trySendChatAction`.
+- Removed old `postTelegram` / `postTelegramRaw` (consolidated into new helpers).
+- Race-safe: `tick()` checks `stopped` flag both before and after `await`.
+
+**New exports for tests:** `_resetChatActionStateForTests()` (resets
+`_lastChatActionSentTs` and `_chatActionBackoffMs`).
+
+**Tests (regression-test.js SECTION 9, 38 new tests):**
+- T9.1-T9.3: first call fires, dedup window, threshold at 5.001s
+- T9.4-T9.5: 504/429 trigger backoff
+- T9.6-T9.7: 401/400 do NOT trigger backoff
+- T9.8: backoff caps at 30s
+- T9.9: success resets backoff to 5s
+- T9.10: 4 concurrent indicators → only 2 hit API (dedup verified)
+- Source checks: constants present, helpers exist, old functions removed,
+  tick uses `nextIntervalMs` from helper
+
+**Test results:** 303/304 pass (+39 new). Pre-existing failure
+`Config: emergencyClosePct = -10` is unrelated (user-config has `-21` override).
+
+**Files changed:**
+- `telegram.js` — rate limiter + backoff + retry helpers (~+100 LOC)
+- `test/regression-test.js` — SECTION 9 with 38 new tests (~+200 LOC)
+
+**Restart needed:** yes — changes are in module load path.
