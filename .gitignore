@@ -50,8 +50,9 @@ state.json.bak
 # Misc
 10000
 
-# Claude Code local settings
-.claude/
+# Claude Code local settings (ignore all except shared project skills)
+.claude/*
+!.claude/skills/
 .gitignore.backup-*
 
 # Backup .gitignore files
