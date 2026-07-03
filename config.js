@@ -98,6 +98,7 @@ export const config = {
     maxBinStep:        u.maxBinStep        ?? 125,
     minVolatility:     u.minVolatility     ?? 3.5, // minimum volatility to consider
     maxVolatility:     u.maxVolatility     ?? 5,
+    lockMaxVolatility: u.lockMaxVolatility  ?? false, // operator pin — stops evolveThresholds drifting the ceiling
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam

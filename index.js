@@ -1379,6 +1379,7 @@ function settingValue(key) {
     trailingTakeProfit: config.management.trailingTakeProfit,
     useDiscordSignals: config.screening.useDiscordSignals,
     blockPvpSymbols: config.screening.blockPvpSymbols,
+    lockMaxVolatility: config.screening.lockMaxVolatility,
     screeningSource: config.screening.source,
     gmgnRequireKol: config.gmgn.requireKol,
     gmgnInterval: config.gmgn.interval,
@@ -1576,6 +1577,7 @@ function renderSettingsMenu(page = "main") {
       ],
       [toggleButton("volumeTrendFilter", "Volume trend filter")],
       [toggleButton("volumeTrendBlockDecel", "Block decelerating")],
+      [toggleButton("lockMaxVolatility", "Lock maxVolatility (no auto-evolve)")],
       [
         inputButton("volumeTrendAccelThreshold", "Accel threshold")[0],
         inputButton("volumeTrendDecelThreshold", "Decel threshold")[0],
@@ -1800,7 +1802,7 @@ async function applySettingsMenuCallback(msg) {
     : ["gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume", "gmgnAthFilterPct", "gmgnMinHolders", "gmgnHoldersLimit", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(key) ? "gmgn"
     : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals" || key === "gmgnIndicatorFilter" || key === "gmgnRequireBbPosition" || key === "gmgnIndicatorInterval" || key === "gmgnRequireBullishSt" || key === "gmgnRejectAtBottom" || key === "gmgnRequireAboveSt" || key === "gmgnMinRsi" || key === "gmgnMaxRsi" ? "indicators"
     : ["minBinsBelow", "maxBinsBelow"].includes(key) ? "strategy"
-    : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "volumeTrendFilter", "volumeTrendAccelThreshold", "volumeTrendDecelThreshold", "volumeTrendBlockDecel"].includes(key) ? "screen"
+    : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "volumeTrendFilter", "volumeTrendAccelThreshold", "volumeTrendDecelThreshold", "volumeTrendBlockDecel", "lockMaxVolatility"].includes(key) ? "screen"
     : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
   await showSettingsMenu({ messageId: msg.messageId, page });

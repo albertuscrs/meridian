@@ -393,7 +393,9 @@ export function evolveThresholds(perfData, config) {
       (l.created_at || "") >= cutoff24h
     );
 
-    if (!recentOperatorTune) {
+    // Hard operator pin — when lockMaxVolatility is set, evolution must never touch
+    // the ceiling (the tighten/loosen ratchet is asymmetric and biases downward).
+    if (!recentOperatorTune && !config.screening.lockMaxVolatility) {
       if (loserVols.length >= 2) {
         // 25th percentile of loser volatilities — this is where things start going wrong
         const loserP25 = percentile(loserVols, 25);

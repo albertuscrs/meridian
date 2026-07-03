@@ -646,9 +646,29 @@ console.log("\n── Catastrophic SL: base-mint blacklist ──");
 }
 
 {
-  // Verify threshold alignment: emergencyClosePct = -10 matches blacklist trigger
+  // Verify threshold alignment: emergencyClosePct doubles as the catastrophic-SL
+  // blacklist trigger. Operator-tuned to -12 on 2026-06-21 (was -10).
   const { config } = await import(new URL("../config.js", import.meta.url).href);
-  assertEquals(config.management.emergencyClosePct, -10, "Config: emergencyClosePct = -10 (catastrophic SL threshold)");
+  assertEquals(config.management.emergencyClosePct, -12, "Config: emergencyClosePct = -12 (catastrophic SL threshold)");
+}
+
+{
+  // lockMaxVolatility wiring — operator pin that stops evolveThresholds drifting the ceiling.
+  const fs = await import("fs");
+  const lessonsSrc = fs.readFileSync(new URL("../lessons.js", import.meta.url), "utf8");
+  assert(lessonsSrc.includes("!config.screening.lockMaxVolatility"),
+    "lockMaxVolatility: evolveThresholds guard present in lessons.js");
+  const configSrc = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
+  assert(/lockMaxVolatility:\s*u\.lockMaxVolatility/.test(configSrc),
+    "lockMaxVolatility: default wired in config.js");
+  const execSrc = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
+  assert(execSrc.includes('lockMaxVolatility: ["screening", "lockMaxVolatility"]'),
+    "lockMaxVolatility: CONFIG_MAP entry present (so /setcfg + update_config work)");
+  const indexSrc = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  assert(indexSrc.includes("lockMaxVolatility: config.screening.lockMaxVolatility"),
+    "lockMaxVolatility: settingValue mapping present (Telegram toggle shows state)");
+  assert(indexSrc.includes('toggleButton("lockMaxVolatility"'),
+    "lockMaxVolatility: /settings toggle button present");
 }
 
 

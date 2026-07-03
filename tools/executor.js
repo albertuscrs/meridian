@@ -364,6 +364,7 @@ const toolMap = {
     const CONFIG_MAP = {
       // screening
       screeningSource: ["screening", "source"],
+      lockMaxVolatility: ["screening", "lockMaxVolatility"],
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
