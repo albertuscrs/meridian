@@ -1534,6 +1534,56 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(execSrc.includes("atomicWriteJson(GMGN_CONFIG_PATH"), "adoption: executor.js persists gmgn-config atomically");
 }
 
+// ─── Indonesian intent guards (agent.js) ────────────────────────────────────────
+
+{
+  const fs = await import("fs");
+  const agentSrc = fs.readFileSync("agent.js", "utf8");
+
+  // Extract the regex literals from source so we can test them without importing
+  // agent.js (which pulls in the whole tool/executor/SDK chain).
+  const extract = (name) => {
+    const m = agentSrc.match(new RegExp(`const ${name} = /(.+)/i;`));
+    return m ? new RegExp(m[1], "i") : null;
+  };
+
+  const mutating = extract("MUTATING_TOOL_INTENTS");
+  assertNotNull(mutating, "intents: MUTATING_TOOL_INTENTS regex extracted");
+  if (mutating) {
+    assert(mutating.test("tutup posisi 1"), "intents: 'tutup posisi 1' is mutating");
+    assert(mutating.test("jual semua token poke"), "intents: 'jual semua token' is mutating");
+    assert(mutating.test("klaim fee sekarang"), "intents: 'klaim fee' is mutating");
+    assert(mutating.test("buka posisi di pool baru"), "intents: 'buka posisi' is mutating");
+    assert(mutating.test("ubah minTvl jadi 5000"), "intents: 'ubah <config>' is mutating");
+    assert(!mutating.test("berapa saldo gw sekarang"), "intents: 'berapa saldo' is NOT mutating");
+    assert(mutating.test("close position 1"), "intents: English 'close position' still mutating (no regression)");
+  }
+
+  const action = extract("ACTION_INTENTS");
+  assertNotNull(action, "intents: ACTION_INTENTS regex extracted");
+  if (action) {
+    assert(action.test("tutup poke sekarang"), "intents: 'tutup' forces tool_choice=required");
+    assert(!action.test("buka telegram dong"), "intents: bare 'buka' does NOT trigger deploy intent");
+    assert(action.test("deploy now"), "intents: English 'deploy' still triggers (no regression)");
+  }
+
+  const configRO = extract("CONFIG_READ_ONLY_INTENTS");
+  assertNotNull(configRO, "intents: CONFIG_READ_ONLY_INTENTS regex extracted");
+  if (configRO) {
+    assert(configRO.test("cek konfigurasi screening dong"), "intents: 'cek konfigurasi' is read-only config");
+    assert(!configRO.test("ubah config minTvl jadi 5000"), "intents: 'ubah config' is NOT read-only");
+  }
+
+  const live = extract("LIVE_DATA_TOOL_INTENTS");
+  assertNotNull(live, "intents: LIVE_DATA_TOOL_INTENTS regex extracted");
+  if (live) {
+    assert(live.test("cek posisi sekarang"), "intents: 'cek posisi' requires live data");
+    assert(live.test("saldo wallet berapa"), "intents: 'saldo' requires live data");
+  }
+
+  assert(agentSrc.includes("export function shouldRequireRealToolUse"), "intents: shouldRequireRealToolUse exported for tests");
+}
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log("\n─────────────────────────────────");

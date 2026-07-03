@@ -49,21 +49,21 @@ const INTENT_TOOLS = {
 
 const INTENT_PATTERNS = [
   { intent: "decisions",   re: /\b(why did you|why'd you|why was (?:this|that|it)|what made you|what was the reason|why no deploy|why didn't you deploy|why did you close|why did you deploy|why did you skip)\b/i },
-  { intent: "deploy",      re: /\b(deploy|open|add liquidity|lp into|invest in)\b/i },
-  { intent: "close",       re: /\b(close|exit|withdraw|remove liquidity|shut down)\b/i },
-  { intent: "claim",       re: /\b(claim|harvest|collect)\b.*\bfee/i },
-  { intent: "swap",        re: /\b(swap|convert|sell|exchange)\b/i },
+  { intent: "deploy",      re: /\b(deploy|open|add liquidity|lp into|invest in|pasang|buka posisi)\b/i },
+  { intent: "close",       re: /\b(close|exit|withdraw|remove liquidity|shut down|tutup|tarik)\b/i },
+  { intent: "claim",       re: /\b(claim|harvest|collect|klaim)\b.*\bfee/i },
+  { intent: "swap",        re: /\b(swap|convert|sell|exchange|jual|beli|tukar(?:kan)?)\b/i },
   { intent: "selfupdate",  re: /\b(self.?update|git pull|pull latest|update (the )?bot|update (the )?agent|update yourself)\b/i },
   { intent: "blocklist",   re: /\b(blacklist|block|unblock|blocklist|blocked deployer|rugger|block dev|block deployer)\b/i },
-  { intent: "config",      re: /\b(config|setting|threshold|update|set |change)\b/i },
-  { intent: "balance",     re: /\b(balance|wallet|sol|how much)\b/i },
-  { intent: "positions",   re: /\b(position|portfolio|open|pnl|yield|range)\b/i },
+  { intent: "config",      re: /\b(config|konfigurasi|setting|pengaturan|threshold|ambang|update|set |change|ubah|ganti|setel|atur)\b/i },
+  { intent: "balance",     re: /\b(balance|wallet|sol|how much|saldo|berapa)\b/i },
+  { intent: "positions",   re: /\b(position|portfolio|open|pnl|yield|range|posisi)\b/i },
   { intent: "strategy",    re: /\b(strategy|strategies)\b/i },
-  { intent: "screen",      re: /\b(screen|candidate|find pool|search|research|token)\b/i },
+  { intent: "screen",      re: /\b(screen|candidate|find pool|search|research|token|cari|kandidat)\b/i },
   { intent: "memory",      re: /\b(memory|pool history|note|remember)\b/i },
   { intent: "smartwallet", re: /\b(smart wallet|kol|whale|watch.?list|add wallet|remove wallet|list wallet|tracked wallet|check pool|who.?s in|wallets in|add to (smart|watch|kol))\b/i },
   { intent: "study",       re: /\b(study top|top lpers?|best lpers?|who.?s lping|lp behavior|lpers?)\b/i },
-  { intent: "performance", re: /\b(performance|history|how.?s the bot|how.?s it doing|stats|report)\b/i },
+  { intent: "performance", re: /\b(performance|history|how.?s the bot|how.?s it doing|stats|report|laporan|kinerja|riwayat)\b/i },
   { intent: "lessons",     re: /\b(lesson|learned|teach|pin|unpin|clear lesson|what did you learn)\b/i },
 ];
 
@@ -127,12 +127,15 @@ function getFallbackClient() {
   return _fallbackClient;
 }
 
-const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself)\b/i;
-const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons)\b/i;
-const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|see)\b.*\b(config|settings?|thresholds?)\b/i;
+// Indonesian keywords are first-class here — the operator drives the bot in Indonesian
+// via Telegram, and a miss on these regexes disables the anti-hallucination guard
+// (mustUseRealTool) for exactly the messages that move funds.
+const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself|tutup|jual|beli|tukar(?:kan)?|klaim|tarik|pasang|buka posisi|buka blokir|ubah|ganti|setel|atur|hapus|blokir|perbarui)\b/i;
+const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons|saldo|posisi|cek|lihat|tampilkan|laporan|riwayat|kandidat|cari pool|kinerja)\b/i;
+const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|see|cek|lihat|tampilkan|tunjukkan)\b.*\b(config|konfigurasi|settings?|pengaturan|thresholds?|ambang)\b/i;
 const DECISION_EXPLANATION_INTENTS = /\b(why did you|why'd you|why was (?:this|that|it)|what made you|what was the reason|why no deploy|why didn't you deploy|why did you close|why did you deploy|why did you skip)\b/i;
 
-function shouldRequireRealToolUse(goal, agentType, interactive = false) {
+export function shouldRequireRealToolUse(goal, agentType, interactive = false) {
   if (agentType === "MANAGER") return false;
   if (DECISION_EXPLANATION_INTENTS.test(goal)) return false;
   if (CONFIG_READ_ONLY_INTENTS.test(goal)) return false;
@@ -228,7 +231,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       let activeClient = agentType === "SCREENER" ? getScreeningClient() : client;
       let switchedToFallback = false;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
-      const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
+      const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock|tutup|jual|tukar(?:kan)?|klaim|tarik|pasang|buka posisi|buka blokir|blokir)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
 
       for (let attempt = 0; attempt < 3; attempt++) {
