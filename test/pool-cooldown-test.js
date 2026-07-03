@@ -1,16 +1,19 @@
 /**
  * Pool Cooldown System — Integration Test
- * 
- * Tests all 5 cooldown scenarios:
- * 1. Low yield       → 4 hours
- * 2. Stop loss       → 2 hours
- * 3. Loss > 1%       → 1 hour
- * 4. OOR big loss    → 6 hours
- * 5. Cumulative loss > $5 → 48 hours
+ *
+ * Tests all 5 cooldown scenarios. Expected durations are read from the live
+ * config (user-config.json overrides), NOT hardcoded — the operator tunes
+ * these and hardcoded values go stale (stopLossCooldownHours 2→6 in June 2026).
+ * 1. Low yield
+ * 2. Stop loss
+ * 3. Loss > 1%
+ * 4. OOR big loss
+ * 5. Cumulative loss > $5
  */
 
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { config } from "../config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const POOL_COOLDOWN_PATH = join(__dirname, "..", "pool-cooldown.js");
@@ -86,7 +89,7 @@ await test("1. Low Yield → 4 hour cooldown", async () => {
 
   const db = await loadPoolMemory();
   const entry = db[pool];
-  const expectedHours = 2;
+  const expectedHours = config.management.lowYieldCooldownHours;
   const actualHours = Math.round((new Date(entry.cooldown_until) - Date.now()) / hoursToMs(1));
   pass("low yield cooldown", actualHours, expectedHours);
 });
@@ -108,7 +111,7 @@ await test("2. Stop Loss → 2 hour cooldown", async () => {
 
   const db = await loadPoolMemory();
   const entry = db[pool];
-  const expectedHours = 2;
+  const expectedHours = config.management.stopLossCooldownHours;
   const actualHours = Math.round((new Date(entry.cooldown_until) - Date.now()) / hoursToMs(1));
   pass("stop loss cooldown", actualHours, expectedHours);
 });
@@ -130,7 +133,7 @@ await test("3. Loss > 1% (manual close) → 1 hour cooldown", async () => {
 
   const db = await loadPoolMemory();
   const entry = db[pool];
-  const expectedHours = 1;
+  const expectedHours = config.management.lossGt1PctCooldownHours;
   const actualHours = Math.round((new Date(entry.cooldown_until) - Date.now()) / hoursToMs(1));
   pass("loss > 1% manual close cooldown", actualHours, expectedHours);
 });
@@ -152,7 +155,7 @@ await test("4. OOR + big loss → 6 hour cooldown", async () => {
 
   const db = await loadPoolMemory();
   const entry = db[pool];
-  const expectedHours = 6;
+  const expectedHours = config.management.oorBigLossCooldownHours;
   const actualHours = Math.round((new Date(entry.cooldown_until) - Date.now()) / hoursToMs(1));
   pass("OOR big loss cooldown", actualHours, expectedHours);
 });
@@ -187,7 +190,7 @@ await test("5a. Cumulative loss > $5 → 48 hour cooldown", async () => {
 
   const db2 = await loadPoolMemory();
   const entry = db2[pool];
-  const expectedHours = 48;
+  const expectedHours = config.management.cumulativeLossCooldownHours;
   const actualHours = Math.round((new Date(entry.cooldown_until) - Date.now()) / hoursToMs(1));
   pass("cumulative loss > $5 cooldown", actualHours, expectedHours);
 });
@@ -225,6 +228,25 @@ await test("5b. Cumulative loss < $5 → NO 48h cooldown (normal OOR applies)", 
   results.push({ name: "cumulative loss < $5 → no 48h cooldown", got: actualHours, expected: "not 48", ok });
   console.log(`${ok ? "✅" : "❌"} cumulative loss < $5 → no 48h cooldown — got ${actualHours}h (not 48)`);
 });
+
+// ─── Cleanup ───────────────────────────────────────────────────
+// This test runs against the LIVE pool-memory.json / token-blacklist.json.
+// Without this block every run leaks 6 TestPool* entries into pool-memory
+// and a fake StopLossMINT into the permanent blacklist.
+
+{
+  const db = await loadPoolMemory();
+  let removed = 0;
+  for (const key of Object.keys(db)) {
+    if (key.startsWith("TestPool")) { delete db[key]; removed++; }
+  }
+  if (removed > 0) await savePoolMemory(db);
+  const { removeFromBlacklist } = await import(join(__dirname, "..", "token-blacklist.js"));
+  for (const mint of ["StopLossMINT", "OORBigLossMINT", "CumLossMINT", "CumLossSmallMINT", "LowYieldMINT", "LossGt1MINT"]) {
+    try { removeFromBlacklist({ mint }); } catch { /* not blacklisted */ }
+  }
+  console.log(`\n🧹 Cleanup: removed ${removed} TestPool* entries + test mints from blacklist`);
+}
 
 // ─── Summary ───────────────────────────────────────────────────
 
