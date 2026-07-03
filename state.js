@@ -14,6 +14,7 @@ import { repoPath } from "./repo-root.js";
 import { atomicWriteJson, readJsonSafe } from "./json-store.js";
 
 const STATE_FILE = repoPath("state.json");
+const STATE_ARCHIVE_FILE = repoPath("state-archive.jsonl");
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;
@@ -447,7 +448,7 @@ export function getStateSummary() {
 
   return {
     open_positions: open.length,
-    closed_positions: closed.length,
+    closed_positions: closed.length + (state.archived_closed_count || 0),
     total_fees_claimed_usd: Math.round(totalFeesClaimed * 100) / 100,
     positions: open.map((p) => ({
       position: p.position,
@@ -632,6 +633,36 @@ export function setLastBriefingDate() {
   const state = load();
   state._lastBriefingDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
   save(state);
+}
+
+/**
+ * Move closed positions older than `retentionDays` out of state.json into
+ * state-archive.jsonl (one JSON line per position). Keeps state.json small —
+ * the 3s PnL poller does a full parse+write of this file on every tick, so
+ * unbounded growth of closed positions directly slows the hot path.
+ * `stateFile`/`archiveFile` overrides exist for tests only.
+ */
+export function archiveClosedPositions({ retentionDays = 30, stateFile = STATE_FILE, archiveFile = STATE_ARCHIVE_FILE } = {}) {
+  const state = readJsonSafe(stateFile, { positions: {}, recentEvents: [], lastUpdated: null });
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const toArchive = [];
+  for (const [addr, pos] of Object.entries(state.positions)) {
+    if (!pos.closed) continue;
+    const closedAt = pos.closed_at ? new Date(pos.closed_at).getTime() : 0;
+    if (closedAt < cutoff) toArchive.push(addr);
+  }
+  if (toArchive.length === 0) {
+    return { archived: 0, remaining: Object.keys(state.positions).length };
+  }
+  const lines = toArchive.map((a) => JSON.stringify(state.positions[a])).join("\n") + "\n";
+  fs.appendFileSync(archiveFile, lines);
+  for (const a of toArchive) delete state.positions[a];
+  state.archived_closed_count = (state.archived_closed_count || 0) + toArchive.length;
+  state.lastUpdated = new Date().toISOString();
+  atomicWriteJson(stateFile, state);
+  const remaining = Object.keys(state.positions).length;
+  log("state", `Archived ${toArchive.length} closed positions (>${retentionDays}d) to state-archive.jsonl — ${remaining} positions remain in state.json`);
+  return { archived: toArchive.length, remaining };
 }
 
 /**

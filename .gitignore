@@ -16,6 +16,7 @@ gmgn-config.json
 
 # Runtime state (position tracking, lessons — user-specific)
 state.json
+state-archive.jsonl
 *.json.tmp
 *.corrupt-*
 lessons.json
@@ -46,7 +47,7 @@ public_key*
 
 # State backups
 state.json.backup-*
-state.json.bak
+state.json.bak*
 *.save
 
 # Misc

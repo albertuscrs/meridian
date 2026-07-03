@@ -39,7 +39,7 @@ import {
   formatApiStatus,
 } from "./tools/api-monitor.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, archiveClosedPositions } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getRecentDeploys, getPoolMemory } from "./pool-memory.js";
 import { blockDev, unblockDev, listBlockedDevs } from "./dev-blocklist.js";
@@ -60,6 +60,7 @@ const isMain = process.env.pm_id != null
 if (isMain) {
   log("startup", "DLMM LP Agent starting...");
   rotateOldLogs();
+  try { archiveClosedPositions(); } catch (e) { log("startup_warn", `Position archive failed: ${e.message}`); }
   log("startup", `Repo: ${REPO_ROOT} | cwd: ${process.cwd()}${process.env.pm_id ? ` | PM2 id: ${process.env.pm_id}` : ""}`);
   if (path.resolve(process.cwd()) !== path.resolve(REPO_ROOT)) {
     log("startup_warn", `process.cwd() differs from repo root — use "npm run pm2:start" (not "pm2 start index.js" from another directory)`);
@@ -947,6 +948,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
 
   // Morning Briefing at 8:00 AM UTC+7 (1:00 AM UTC)
   const briefingTask = cron.schedule(`0 1 * * *`, async () => {
+    try { archiveClosedPositions(); } catch (e) { log("cron_error", `Position archive failed: ${e.message}`); }
     await runBriefing();
   }, { timezone: 'UTC' });
 

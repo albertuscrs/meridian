@@ -1477,6 +1477,49 @@ function trySendChatActionLogic(state, now, fetchResult) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ─── state.js archiveClosedPositions ───────────────────────────────────────────
+
+{
+  const fs = await import("fs");
+  const path = await import("path");
+  const os = await import("os");
+  const { archiveClosedPositions } = await import("../state.js");
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "meridian-archive-"));
+  const stateFile = path.join(dir, "state.json");
+  const archiveFile = path.join(dir, "state-archive.jsonl");
+  const DAY = 24 * 60 * 60 * 1000;
+  const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+  fs.writeFileSync(stateFile, JSON.stringify({
+    positions: {
+      open1:     { position: "open1", closed: false, deployed_at: iso(2 * DAY) },
+      oldClosed: { position: "oldClosed", closed: true, closed_at: iso(40 * DAY) },
+      newClosed: { position: "newClosed", closed: true, closed_at: iso(1 * DAY) },
+    },
+    recentEvents: [],
+  }));
+
+  const res = archiveClosedPositions({ retentionDays: 30, stateFile, archiveFile });
+  assertEquals(res, { archived: 1, remaining: 2 }, "archive: 40d-old closed archived, open + recent kept");
+
+  const after = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert(
+    after.positions.open1 && after.positions.newClosed && !after.positions.oldClosed,
+    "archive: state.json keeps open + recent-closed only",
+    Object.keys(after.positions), ["open1", "newClosed"],
+  );
+  assertEquals(after.archived_closed_count, 1, "archive: archived_closed_count tracked");
+
+  const lines = fs.readFileSync(archiveFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assertEquals(lines.length, 1, "archive: one JSONL line written");
+  assertEquals(lines[0].position, "oldClosed", "archive: archived record is the old closed position");
+
+  const res2 = archiveClosedPositions({ retentionDays: 30, stateFile, archiveFile });
+  assertEquals(res2, { archived: 0, remaining: 2 }, "archive: idempotent second run (no duplicate lines)");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ─── Atomic store adoption (source checks) ──────────────────────────────────────
 
 {
