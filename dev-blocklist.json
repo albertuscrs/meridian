@@ -48,5 +48,10 @@
     "label": "unknown",
     "reason": "yenni kol is a bad kol",
     "added_at": "2026-05-05T08:16:03.578Z"
+  },
+  "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9": {
+    "label": "RIV-deployer",
+    "reason": "Deployer of RIV (HREUDWzLtmJrMjav48RY9iPRJr9r8KoTBLjWNjdPpump) — RIV-SOL hit -20.95% stop loss. Deployer wallet funds multiple pump.fun pools with large initial liquidity setups.",
+    "added_at": "2026-06-18T11:48:31.185Z"
   }
 }
