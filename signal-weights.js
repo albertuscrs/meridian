@@ -13,6 +13,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 
 import { repoPath } from "./repo-root.js";
+import { atomicWriteJson, readJsonSafe } from "./json-store.js";
 
 const WEIGHTS_FILE = repoPath("signal-weights.json");
 

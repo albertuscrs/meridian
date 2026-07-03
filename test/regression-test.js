@@ -1511,6 +1511,27 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(lessonsSrc.includes("atomicWriteJson(USER_CONFIG_PATH"), "adoption: lessons.js evolveThresholds persists user-config atomically");
   assert(execSrc.includes("atomicWriteJson(USER_CONFIG_PATH"), "adoption: executor.js update_config persists user-config atomically");
   assert(execSrc.includes("atomicWriteJson(GMGN_CONFIG_PATH"), "adoption: executor.js persists gmgn-config atomically");
+
+  // Every consumer must actually import the helpers — signal-weights.js shipped
+  // without the import and threw "readJsonSafe is not defined" at runtime,
+  // killing exactly the screening cycles that had deployable candidates.
+  const path = await import("path");
+  const roots = [".", "tools"];
+  for (const dir of roots) {
+    for (const file of fs.readdirSync(dir)) {
+      if (!file.endsWith(".js") || file === "json-store.js") continue;
+      const full = path.join(dir, file);
+      const src = fs.readFileSync(full, "utf8");
+      if (/\b(?:readJsonSafe|atomicWriteJson)\(/.test(src)) {
+        assert(/from "\.\.?\/json-store\.js"/.test(src), `adoption: ${full} imports json-store helpers it uses`);
+      }
+    }
+  }
+
+  // Functional: signal-weights must load without throwing (the exact failure mode)
+  const sw = await import(new URL("../signal-weights.js", import.meta.url).href);
+  const weights = sw.loadWeights();
+  assert(weights && typeof weights.weights === "object", "adoption: signal-weights loadWeights() returns weights");
 }
 
 // ─── Indonesian intent guards (agent.js) ────────────────────────────────────────
