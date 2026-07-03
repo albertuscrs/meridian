@@ -54,6 +54,20 @@ function loadChatId() {
   chatId = resolveChatId();
 }
 
+// saveAllowedUserId (below) persists the locked user to user-config.json, but the
+// allowlist starts from env only — without this read-back a /lockuser lock silently
+// vanishes on restart unless TELEGRAM_ALLOWED_USER_IDS is also set in .env.
+function loadAllowedUserIds() {
+  try {
+    if (!fs.existsSync(USER_CONFIG_PATH)) return;
+    const cfg = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
+    const saved = nonEmptyChatId(cfg.telegramAllowedUserId);
+    if (saved) ALLOWED_USER_IDS.add(saved);
+  } catch (error) {
+    log("telegram_warn", `Invalid user-config.json; allowedUserId not loaded: ${error.message}`);
+  }
+}
+
 function saveChatId(id) {
   try {
     let cfg = fs.existsSync(USER_CONFIG_PATH)
@@ -80,6 +94,7 @@ export function saveAllowedUserId(userId) {
 }
 
 loadChatId();
+loadAllowedUserIds();
 
 function isAuthorizedIncomingMessage(msg) {
   const incomingChatId = String(msg.chat?.id || "");
@@ -530,6 +545,7 @@ async function poll(onMessage) {
 export function startPolling(onMessage) {
   if (!TOKEN) return;
   loadChatId();
+  loadAllowedUserIds();
   if (!chatId) {
     log("telegram_warn", "TELEGRAM_CHAT_ID not set in .env or user-config.telegramChatId — outbound notifications and inbound control disabled until configured.");
   }

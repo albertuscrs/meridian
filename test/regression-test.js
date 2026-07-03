@@ -1584,6 +1584,18 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(agentSrc.includes("export function shouldRequireRealToolUse"), "intents: shouldRequireRealToolUse exported for tests");
 }
 
+// ─── Telegram allowed-user read-back (telegram.js) ──────────────────────────────
+
+{
+  const fs = await import("fs");
+  const tgSrc = fs.readFileSync("telegram.js", "utf8");
+  assert(tgSrc.includes("function loadAllowedUserIds()"), "allowlist: loadAllowedUserIds defined");
+  assert(tgSrc.includes("cfg.telegramAllowedUserId"), "allowlist: reads telegramAllowedUserId from user-config");
+  assert(/loadChatId\(\);\nloadAllowedUserIds\(\);/.test(tgSrc), "allowlist: loaded at module init (survives restart)");
+  const pollIdx = tgSrc.indexOf("export function startPolling");
+  assert(pollIdx > -1 && tgSrc.indexOf("loadAllowedUserIds();", pollIdx) > -1, "allowlist: re-loaded in startPolling");
+}
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log("\n─────────────────────────────────");
