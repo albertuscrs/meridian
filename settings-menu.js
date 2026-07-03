@@ -170,7 +170,18 @@ function inputButton(key, label, { digits = 0 } = {}) {
   return [settingButton(`${label}: ${shown} ✏`, `cfg:input:${key}`)];
 }
 
-function renderSettingsMenu(page = "main") {
+// Multi-choice option button: marks the currently active choice with ✓ so the
+// menu reads as state, not just a list of actions.
+function choiceButton(key, label, raw) {
+  const current = settingValue(key);
+  const target = normalizeMenuValue(key, raw);
+  const active = Array.isArray(target)
+    ? Array.isArray(current) && current.length === target.length && target.every((v) => current.includes(v))
+    : current != null && String(current) === String(target);
+  return settingButton(`${label}${active ? " ✓" : ""}`, `cfg:set:${key}:${raw}`);
+}
+
+export function renderSettingsMenu(page = "main") {
   const title = page === "main" ? "Settings menu" : `Settings: ${page}`;
   const summary = [
     title,
@@ -227,32 +238,32 @@ function renderSettingsMenu(page = "main") {
       inputButton("minFeeActiveTvlRatio", "Min fee/TVL %", { digits: 2 }),
       inputButton("maxFeeActiveTvlRatio", "Max fee/TVL %", { digits: 2 }),
       [
-        settingButton(`Close: main${config.management.closeProfile === "main" ? " ✓" : ""}`, "cfg:set:closeProfile:main"),
-        settingButton(`pecut${config.management.closeProfile === "pecut" ? " ✓" : ""}`, "cfg:set:closeProfile:pecut"),
-        settingButton(`experimental${config.management.closeProfile === "experimental" ? " ✓" : ""}`, "cfg:set:closeProfile:experimental"),
+        choiceButton("closeProfile", "Close: main", "main"),
+        choiceButton("closeProfile", "pecut", "pecut"),
+        choiceButton("closeProfile", "experimental", "experimental"),
       ],
       [toggleButton("r8IndicatorCheck", "R8 indicator check")],
       [
-        settingButton(`R8: ST${config.management.r8ExitPreset === "supertrend_break" ? " ✓" : ""}`, "cfg:set:r8ExitPreset:supertrend_break"),
-        settingButton(`RSI${config.management.r8ExitPreset === "rsi_reversal" ? " ✓" : ""}`, "cfg:set:r8ExitPreset:rsi_reversal"),
-        settingButton(`BB+RSI${config.management.r8ExitPreset === "bb_plus_rsi" ? " ✓" : ""}`, "cfg:set:r8ExitPreset:bb_plus_rsi"),
-        settingButton(`ST/RSI${config.management.r8ExitPreset === "supertrend_or_rsi" ? " ✓" : ""}`, "cfg:set:r8ExitPreset:supertrend_or_rsi"),
+        choiceButton("r8ExitPreset", "R8: ST", "supertrend_break"),
+        choiceButton("r8ExitPreset", "RSI", "rsi_reversal"),
+        choiceButton("r8ExitPreset", "BB+RSI", "bb_plus_rsi"),
+        choiceButton("r8ExitPreset", "ST/RSI", "supertrend_or_rsi"),
       ],
       inputButton("r8OorCooldownHours", "R8 cooldown hrs"),
     ];
   } else if (page === "screen") {
     rows = [
       [
-        settingButton(`Source: Meteora${config.screening.source === "meteora" ? " ✓" : ""}`, "cfg:set:screeningSource:meteora"),
-        settingButton(`Source: GMGN${config.screening.source === "gmgn" ? " ✓" : ""}`, "cfg:set:screeningSource:gmgn"),
+        choiceButton("screeningSource", "Source: Meteora", "meteora"),
+        choiceButton("screeningSource", "Source: GMGN", "gmgn"),
       ],
       [toggleButton("gmgnRequireKol", "GMGN require KOL")],
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
       [
-        settingButton("5m", "cfg:set:gmgnInterval:5m"),
-        settingButton("1h", "cfg:set:gmgnInterval:1h"),
-        settingButton("6h", "cfg:set:gmgnInterval:6h"),
-        settingButton("24h", "cfg:set:gmgnInterval:24h"),
+        choiceButton("gmgnInterval", "5m", "5m"),
+        choiceButton("gmgnInterval", "1h", "1h"),
+        choiceButton("gmgnInterval", "6h", "6h"),
+        choiceButton("gmgnInterval", "24h", "24h"),
       ],
       [
         inputButton("gmgnMinVolume", "Min volume")[0],
@@ -276,8 +287,8 @@ function renderSettingsMenu(page = "main") {
   } else if (page === "strategy") {
     rows = [
       [
-        settingButton("spot", "cfg:set:strategy:spot"),
-        settingButton("bid_ask", "cfg:set:strategy:bid_ask"),
+        choiceButton("strategy", "spot", "spot"),
+        choiceButton("strategy", "bid_ask", "bid_ask"),
       ],
       inputButton("minBinsBelow", "Min bins"),
       inputButton("maxBinsBelow", "Max bins"),
@@ -341,24 +352,24 @@ function renderSettingsMenu(page = "main") {
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("requireAllIntervals", "Require all TF")],
       [toggleButton("gmgnIndicatorFilter", "GMGN indicator filter"), toggleButton("gmgnRequireBbPosition", "Require BB position")],
       [
-        settingButton("TF: 5m", "cfg:set:indicatorIntervals:5_MINUTE"),
-        settingButton("TF: 15m", "cfg:set:indicatorIntervals:15_MINUTE"),
-        settingButton("TF: both", "cfg:set:indicatorIntervals:both"),
+        choiceButton("indicatorIntervals", "TF: 5m", "5_MINUTE"),
+        choiceButton("indicatorIntervals", "TF: 15m", "15_MINUTE"),
+        choiceButton("indicatorIntervals", "TF: both", "both"),
       ],
       [
-        settingButton("Entry: ST", "cfg:set:indicatorEntryPreset:supertrend_break"),
-        settingButton("Entry: RSI", "cfg:set:indicatorEntryPreset:rsi_reversal"),
-        settingButton("Entry: ST/RSI", "cfg:set:indicatorEntryPreset:supertrend_or_rsi"),
+        choiceButton("indicatorEntryPreset", "Entry: ST", "supertrend_break"),
+        choiceButton("indicatorEntryPreset", "Entry: RSI", "rsi_reversal"),
+        choiceButton("indicatorEntryPreset", "Entry: ST/RSI", "supertrend_or_rsi"),
       ],
       [
-        settingButton("Exit: ST", "cfg:set:indicatorExitPreset:supertrend_break"),
-        settingButton("Exit: RSI", "cfg:set:indicatorExitPreset:rsi_reversal"),
-        settingButton("Exit: BB+RSI", "cfg:set:indicatorExitPreset:bb_plus_rsi"),
+        choiceButton("indicatorExitPreset", "Exit: ST", "supertrend_break"),
+        choiceButton("indicatorExitPreset", "Exit: RSI", "rsi_reversal"),
+        choiceButton("indicatorExitPreset", "Exit: BB+RSI", "bb_plus_rsi"),
       ],
       [
-        settingButton("GMGN ST", "cfg:set:gmgnIndicatorInterval:5_MINUTE"),
-        settingButton("GMGN 15m", "cfg:set:gmgnIndicatorInterval:15_MINUTE"),
-        settingButton("GMGN 1h", "cfg:set:gmgnIndicatorInterval:1h"),
+        choiceButton("gmgnIndicatorInterval", "GMGN ST", "5_MINUTE"),
+        choiceButton("gmgnIndicatorInterval", "GMGN 15m", "15_MINUTE"),
+        choiceButton("gmgnIndicatorInterval", "GMGN 1h", "1h"),
       ],
       [toggleButton("gmgnRequireBullishSt", "Bullish ST"), toggleButton("gmgnRejectAtBottom", "Reject at bottom"), toggleButton("gmgnRequireAboveSt", "Above ST")],
       inputButton("gmgnMinRsi", "Min RSI"),
@@ -368,8 +379,8 @@ function renderSettingsMenu(page = "main") {
   } else {
     rows = [
       [
-        settingButton(`Source: Meteora${config.screening.source === "meteora" ? " ✓" : ""}`, "cfg:set:screeningSource:meteora"),
-        settingButton(`Source: GMGN${config.screening.source === "gmgn" ? " ✓" : ""}`, "cfg:set:screeningSource:gmgn"),
+        choiceButton("screeningSource", "Source: Meteora", "meteora"),
+        choiceButton("screeningSource", "Source: GMGN", "gmgn"),
       ],
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("trailingTakeProfit", "Trailing TP")],

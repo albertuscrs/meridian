@@ -1654,6 +1654,23 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(indexSrc.includes('p.strategy ?? "?"'), "strategy label: unknown strategy shows ? (honest fallback)");
 }
 
+// ─── /settings active-choice marks ──────────────────────────────────────────────
+
+{
+  const fs = await import("fs");
+
+  // Every multi-choice /settings row goes through choiceButton (✓ on active)
+  const settingsSrc = fs.readFileSync("settings-menu.js", "utf8");
+  assert(settingsSrc.includes("function choiceButton"), "settings ✓: choiceButton helper defined");
+  for (const key of ["closeProfile", "r8ExitPreset", "screeningSource", "gmgnInterval", "strategy",
+                     "indicatorIntervals", "indicatorEntryPreset", "indicatorExitPreset", "gmgnIndicatorInterval"]) {
+    assert(settingsSrc.includes(`choiceButton("${key}"`), `settings ✓: ${key} choices rendered via choiceButton`);
+  }
+  // No leftover cfg:set buttons built without active-state logic on those keys
+  assert(!settingsSrc.includes('settingButton("TF: 5m"'), "settings ✓: old unmarked TF buttons removed");
+  assert(!settingsSrc.includes('settingButton("Entry: ST"'), "settings ✓: old unmarked Entry buttons removed");
+}
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log("\n─────────────────────────────────");
