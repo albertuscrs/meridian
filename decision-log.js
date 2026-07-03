@@ -1,22 +1,15 @@
-import fs from "fs";
 import { repoPath } from "./repo-root.js";
+import { atomicWriteJson, readJsonSafe } from "./json-store.js";
 
 const DECISION_LOG_FILE = repoPath("decision-log.json");
 const MAX_DECISIONS = 100;
 
 function load() {
-  if (!fs.existsSync(DECISION_LOG_FILE)) {
-    return { decisions: [] };
-  }
-  try {
-    return JSON.parse(fs.readFileSync(DECISION_LOG_FILE, "utf8"));
-  } catch {
-    return { decisions: [] };
-  }
+  return readJsonSafe(DECISION_LOG_FILE, { decisions: [] });
 }
 
 function save(data) {
-  fs.writeFileSync(DECISION_LOG_FILE, JSON.stringify(data, null, 2));
+  atomicWriteJson(DECISION_LOG_FILE, data);
 }
 
 function sanitize(value, maxLen = 280) {

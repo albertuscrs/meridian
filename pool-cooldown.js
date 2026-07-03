@@ -20,6 +20,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
 import { addToBlacklist } from "./token-blacklist.js";
+import { atomicWriteJson, readJsonSafe } from "./json-store.js";
 
 const POOL_MEMORY_FILE = "./pool-memory.json";
 
@@ -42,16 +43,11 @@ export const CLOSE_REASON_R8_HELD = "r8 held";
 // ─── Load / Save ───────────────────────────────────────────────
 
 function load() {
-  if (!fs.existsSync(POOL_MEMORY_FILE)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(POOL_MEMORY_FILE, "utf8"));
-  } catch {
-    return {};
-  }
+  return readJsonSafe(POOL_MEMORY_FILE, {});
 }
 
 function save(db) {
-  fs.writeFileSync(POOL_MEMORY_FILE, JSON.stringify(db, null, 2));
+  atomicWriteJson(POOL_MEMORY_FILE, db);
 }
 
 // ─── Helpers ───────────────────────────────────────────────────

@@ -66,22 +66,17 @@ export function loadWeights() {
     log("signal_weights", "Created signal-weights.json with default weights");
     return initial;
   }
-  try {
-    return JSON.parse(fs.readFileSync(WEIGHTS_FILE, "utf8"));
-  } catch (err) {
-    log("signal_weights_error", `Failed to read signal-weights.json: ${err.message}`);
-    return {
-      weights: { ...DEFAULT_WEIGHTS },
-      last_recalc: null,
-      recalc_count: 0,
-      history: [],
-    };
-  }
+  return readJsonSafe(WEIGHTS_FILE, {
+    weights: { ...DEFAULT_WEIGHTS },
+    last_recalc: null,
+    recalc_count: 0,
+    history: [],
+  });
 }
 
 export function saveWeights(data) {
   try {
-    fs.writeFileSync(WEIGHTS_FILE, JSON.stringify(data, null, 2));
+    atomicWriteJson(WEIGHTS_FILE, data);
   } catch (err) {
     log("signal_weights_error", `Failed to write signal-weights.json: ${err.message}`);
   }

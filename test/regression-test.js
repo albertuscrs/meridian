@@ -1450,6 +1450,47 @@ function trySendChatActionLogic(state, now, fetchResult) {
 }
 
 
+// ─── JSON Store (atomic write + corrupt-file protection) ───────────────────────
+
+{
+  const fs = await import("fs");
+  const path = await import("path");
+  const os = await import("os");
+  const { atomicWriteJson, readJsonSafe } = await import("../json-store.js");
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "meridian-jsonstore-"));
+  const f = path.join(dir, "test.json");
+
+  atomicWriteJson(f, { a: 1, b: [2, 3] });
+  assertEquals(readJsonSafe(f, null), { a: 1, b: [2, 3] }, "json-store: atomic write + read round-trip");
+  assert(!fs.existsSync(f + ".tmp"), "json-store: tmp file removed after rename");
+
+  assertEquals(readJsonSafe(path.join(dir, "missing.json"), { x: 1 }), { x: 1 }, "json-store: missing file returns fallback");
+
+  fs.writeFileSync(f, "{ definitely not json");
+  assertEquals(readJsonSafe(f, { fallback: true }), { fallback: true }, "json-store: corrupt file returns fallback");
+  const backups = fs.readdirSync(dir).filter((n) => n.startsWith("test.json.corrupt-"));
+  assertEquals(backups.length, 1, "json-store: corrupt file backed up to .corrupt-*");
+  assertEquals(fs.readFileSync(path.join(dir, backups[0]), "utf8"), "{ definitely not json", "json-store: backup preserves original bytes");
+  assertEquals(fs.readFileSync(f, "utf8"), "{ definitely not json", "json-store: corrupt original not overwritten by read");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ─── Atomic store adoption (source checks) ──────────────────────────────────────
+
+{
+  const fs = await import("fs");
+  const stateSrc = fs.readFileSync("state.js", "utf8");
+  const lessonsSrc = fs.readFileSync("lessons.js", "utf8");
+  const execSrc = fs.readFileSync("tools/executor.js", "utf8");
+  assert(stateSrc.includes("atomicWriteJson(STATE_FILE"), "adoption: state.js saves via atomicWriteJson");
+  assert(stateSrc.includes("readJsonSafe(STATE_FILE"), "adoption: state.js loads via readJsonSafe");
+  assert(lessonsSrc.includes("atomicWriteJson(USER_CONFIG_PATH"), "adoption: lessons.js evolveThresholds persists user-config atomically");
+  assert(execSrc.includes("atomicWriteJson(USER_CONFIG_PATH"), "adoption: executor.js update_config persists user-config atomically");
+  assert(execSrc.includes("atomicWriteJson(GMGN_CONFIG_PATH"), "adoption: executor.js persists gmgn-config atomically");
+}
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log("\n─────────────────────────────────");

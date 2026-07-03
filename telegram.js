@@ -1,6 +1,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { atomicWriteJson } from "./json-store.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 
@@ -59,7 +60,7 @@ function saveChatId(id) {
       ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
       : {};
     cfg.telegramChatId = id;
-    fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(cfg, null, 2));
+    atomicWriteJson(USER_CONFIG_PATH, cfg);
   } catch (e) {
     log("telegram_error", `Failed to persist chatId: ${e.message}`);
   }
@@ -71,7 +72,7 @@ export function saveAllowedUserId(userId) {
       ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
       : {};
     cfg.telegramAllowedUserId = String(userId);
-    fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(cfg, null, 2));
+    atomicWriteJson(USER_CONFIG_PATH, cfg);
     ALLOWED_USER_IDS.add(String(userId));
   } catch (e) {
     log("telegram_error", `Failed to persist allowedUserId: ${e.message}`);

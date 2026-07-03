@@ -10,6 +10,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
 import { repoPath } from "./repo-root.js";
+import { atomicWriteJson, readJsonSafe } from "./json-store.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 
@@ -45,18 +46,11 @@ function sanitizeLessonText(text, maxLen = MAX_MANUAL_LESSON_LENGTH) {
 }
 
 function load() {
-  if (!fs.existsSync(LESSONS_FILE)) {
-    return { lessons: [], performance: [] };
-  }
-  try {
-    return JSON.parse(fs.readFileSync(LESSONS_FILE, "utf8"));
-  } catch {
-    return { lessons: [], performance: [] };
-  }
+  return readJsonSafe(LESSONS_FILE, { lessons: [], performance: [] });
 }
 
 function save(data) {
-  fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
+  atomicWriteJson(LESSONS_FILE, data);
 }
 
 function buildSignalSnapshot(perf) {
@@ -493,16 +487,13 @@ export function evolveThresholds(perfData, config) {
   if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
 
   // ── Persist changes to user-config.json ───────────────────────
-  let userConfig = {};
-  if (fs.existsSync(USER_CONFIG_PATH)) {
-    try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /* ignore */ }
-  }
+  const userConfig = readJsonSafe(USER_CONFIG_PATH, {});
 
   Object.assign(userConfig, changes);
   userConfig._lastEvolved = new Date().toISOString();
   userConfig._positionsAtEvolution = perfData.length;
 
-  fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+  atomicWriteJson(USER_CONFIG_PATH, userConfig);
 
   // Apply to live config object immediately
   const s = config.screening;

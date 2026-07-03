@@ -6,23 +6,18 @@
  * before the pool list reaches the LLM.
  */
 
-import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { atomicWriteJson, readJsonSafe } from "./json-store.js";
 
 const BLOCKLIST_FILE = repoPath("dev-blocklist.json");
 
 function load() {
-  if (!fs.existsSync(BLOCKLIST_FILE)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(BLOCKLIST_FILE, "utf8"));
-  } catch {
-    return {};
-  }
+  return readJsonSafe(BLOCKLIST_FILE, {});
 }
 
 function save(data) {
-  fs.writeFileSync(BLOCKLIST_FILE, JSON.stringify(data, null, 2));
+  atomicWriteJson(BLOCKLIST_FILE, data);
 }
 
 export function isDevBlocked(devWallet) {

@@ -25,6 +25,7 @@ import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
 import { REPO_ROOT, repoPath } from "../repo-root.js";
+import { atomicWriteJson, readJsonSafe } from "../json-store.js";
 import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening-scales.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
@@ -665,10 +666,7 @@ const toolMap = {
     }
 
     // Persist GMGN tuning to gmgn-config.json, and everything else to user-config.json.
-    let gmgnConfig = {};
-    if (fs.existsSync(GMGN_CONFIG_PATH)) {
-      try { gmgnConfig = JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8")); } catch { /**/ }
-    }
+    const gmgnConfig = readJsonSafe(GMGN_CONFIG_PATH, {});
     let wroteUserConfig = false;
     let wroteGmgnConfig = false;
     for (const [key, val] of Object.entries(applied)) {
@@ -702,11 +700,11 @@ const toolMap = {
     const tunedAt = new Date().toISOString();
     if (wroteUserConfig) {
       userConfig._lastAgentTune = tunedAt;
-      fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+      atomicWriteJson(USER_CONFIG_PATH, userConfig);
     }
     if (wroteGmgnConfig) {
       gmgnConfig._lastAgentTune = tunedAt;
-      fs.writeFileSync(GMGN_CONFIG_PATH, JSON.stringify(gmgnConfig, null, 2));
+      atomicWriteJson(GMGN_CONFIG_PATH, gmgnConfig);
     }
 
     // Restart cron jobs if intervals changed
