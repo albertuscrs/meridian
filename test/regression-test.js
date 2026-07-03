@@ -664,10 +664,10 @@ console.log("\n── Catastrophic SL: base-mint blacklist ──");
   const execSrc = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   assert(execSrc.includes('lockMaxVolatility: ["screening", "lockMaxVolatility"]'),
     "lockMaxVolatility: CONFIG_MAP entry present (so /setcfg + update_config work)");
-  const indexSrc = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
-  assert(indexSrc.includes("lockMaxVolatility: config.screening.lockMaxVolatility"),
+  const settingsSrc = fs.readFileSync(new URL("../settings-menu.js", import.meta.url), "utf8");
+  assert(settingsSrc.includes("lockMaxVolatility: config.screening.lockMaxVolatility"),
     "lockMaxVolatility: settingValue mapping present (Telegram toggle shows state)");
-  assert(indexSrc.includes('toggleButton("lockMaxVolatility"'),
+  assert(settingsSrc.includes('toggleButton("lockMaxVolatility"'),
     "lockMaxVolatility: /settings toggle button present");
 }
 
@@ -941,36 +941,36 @@ console.log("\n── GMGN Settings: CONFIG_MAP + UI structure ──");
 {
   const fs = await import("fs");
   const { fileURLToPath } = await import("url");
-  const indexPath = fileURLToPath(new URL("../index.js", import.meta.url));
-  const indexSrc = fs.readFileSync(indexPath, "utf8");
+  const settingsPath = fileURLToPath(new URL("../settings-menu.js", import.meta.url));
+  const settingsSrc = fs.readFileSync(settingsPath, "utf8");
 
   // Test 4: Safety page buttons exist
-  assert(indexSrc.includes("cfg:page:safety"), "Index: Safety page nav button exists");
-  assert(indexSrc.includes("gmgnMaxTop10HolderRate"), "Index: Max top10 holder rate button exists");
-  assert(indexSrc.includes("gmgnMaxBundlerRate"), "Index: Max bundler rate button exists");
-  assert(indexSrc.includes("gmgnMaxRatTraderRate"), "Index: Max rat trader rate button exists");
-  assert(indexSrc.includes("gmgnMaxFreshWalletRate"), "Index: Max fresh wallet rate button exists");
-  assert(indexSrc.includes("gmgnMaxDevTeamHoldRate"), "Index: Max dev hold rate button exists");
-  assert(indexSrc.includes("gmgnMaxBotDegenRate"), "Index: Max bot degen rate button exists");
-  assert(indexSrc.includes("gmgnMaxRugRatio"), "Index: Max rug ratio button exists");
-  assert(indexSrc.includes("gmgnMaxSniperCount"), "Index: Max sniper count button exists");
-  assert(indexSrc.includes("gmgnMaxSniperHoldRate"), "Index: Max sniper hold rate button exists");
-  assert(indexSrc.includes("gmgnMinSmartDegenCount"), "Index: Min smart degen count button exists");
+  assert(settingsSrc.includes("cfg:page:safety"), "Settings: Safety page nav button exists");
+  assert(settingsSrc.includes("gmgnMaxTop10HolderRate"), "Settings: Max top10 holder rate button exists");
+  assert(settingsSrc.includes("gmgnMaxBundlerRate"), "Settings: Max bundler rate button exists");
+  assert(settingsSrc.includes("gmgnMaxRatTraderRate"), "Settings: Max rat trader rate button exists");
+  assert(settingsSrc.includes("gmgnMaxFreshWalletRate"), "Settings: Max fresh wallet rate button exists");
+  assert(settingsSrc.includes("gmgnMaxDevTeamHoldRate"), "Settings: Max dev hold rate button exists");
+  assert(settingsSrc.includes("gmgnMaxBotDegenRate"), "Settings: Max bot degen rate button exists");
+  assert(settingsSrc.includes("gmgnMaxRugRatio"), "Settings: Max rug ratio button exists");
+  assert(settingsSrc.includes("gmgnMaxSniperCount"), "Settings: Max sniper count button exists");
+  assert(settingsSrc.includes("gmgnMaxSniperHoldRate"), "Settings: Max sniper hold rate button exists");
+  assert(settingsSrc.includes("gmgnMinSmartDegenCount"), "Settings: Min smart degen count button exists");
 
   // Test 5: GMGN page (volume) buttons exist
-  assert(indexSrc.includes("gmgnMinMcap"), "Index: Min mcap button exists");
-  assert(indexSrc.includes("gmgnMaxMcap"), "Index: Max mcap button exists");
-  assert(indexSrc.includes("gmgnMinVolume"), "Index: Min volume button exists");
-  assert(indexSrc.includes("gmgnAthFilterPct"), "Index: ATH filter pct button exists");
-  assert(indexSrc.includes("gmgnMinHolders"), "Index: Min holders button exists");
-  assert(indexSrc.includes("gmgnHoldersLimit"), "Index: Holders limit button exists");
+  assert(settingsSrc.includes("gmgnMinMcap"), "Settings: Min mcap button exists");
+  assert(settingsSrc.includes("gmgnMaxMcap"), "Settings: Max mcap button exists");
+  assert(settingsSrc.includes("gmgnMinVolume"), "Settings: Min volume button exists");
+  assert(settingsSrc.includes("gmgnAthFilterPct"), "Settings: ATH filter pct button exists");
+  assert(settingsSrc.includes("gmgnMinHolders"), "Settings: Min holders button exists");
+  assert(settingsSrc.includes("gmgnHoldersLimit"), "Settings: Holders limit button exists");
 
   // Test 6: Indicators page — requireBbPosition toggle
-  assert(indexSrc.includes("gmgnRequireBbPosition"), "Index: Require BB position toggle exists");
-  assert(indexSrc.includes("gmgnIndicatorFilter"), "Index: GMGN indicator filter toggle exists");
+  assert(settingsSrc.includes("gmgnRequireBbPosition"), "Settings: Require BB position toggle exists");
+  assert(settingsSrc.includes("gmgnIndicatorFilter"), "Settings: GMGN indicator filter toggle exists");
 
   // Test 7: Page routing includes safety keys
-  assert(indexSrc.includes('"safety"'), "Index: Safety page routing exists");
+  assert(settingsSrc.includes('"safety"'), "Settings: Safety page routing exists");
 }
 
 
@@ -1099,33 +1099,11 @@ function hasAcceleratingBoost(pool, accel = 10) {
 
 console.log("\n── Mgmt Display: fmtAge, fmtFeeTvl, positionStatusEmoji, feeTvlBar ──");
 
-function fmtAge(minutes) {
-  if (minutes == null || !Number.isFinite(minutes)) return "—";
-  if (minutes < 60) return `${Math.round(minutes)}m`;
-  const h = Math.floor(minutes / 60);
-  const m = Math.round(minutes % 60);
-  return m === 0 ? `${h}h` : `${h}h ${m}m`;
-}
-
-function positionStatusEmoji(p) {
-  if (p.pnl_pct == null) return "⚪";
-  if (!p.in_range) return "🔴";
-  if (p.pnl_pct >= 2) return "🟢";
-  if (p.pnl_pct >= 0) return "🟡";
-  if (p.pnl_pct >= -3) return "🟠";
-  return "🔴";
-}
-
-function feeTvlBar(value) {
-  if (value == null || !Number.isFinite(Number(value))) return "";
-  const n = Number(value);
-  if (n < 1) return "▁";
-  if (n < 3) return "▂▁";
-  if (n < 6) return "▃▂▁";
-  if (n < 10) return "▄▃▂▁";
-  if (n < 20) return "▅▄▃▂▁";
-  return "▆▅▄▃▂▁";
-}
+// display.js is dependency-free, so test the real implementations directly
+// (these used to be inline mirror copies that could drift from index.js).
+const { fmtAge, positionStatusEmoji, feeTvlBar } = await import(
+  new URL("../display.js", import.meta.url).href
+);
 
 // fmtAge tests
 {
@@ -1180,16 +1158,17 @@ function feeTvlBar(value) {
   assertEquals(feeTvlBar(100), "▆▅▄▃▂▁", "feeBar: 100% (capped at max bar)");
 }
 
-// Code structure: helpers exist in index.js
+// Code structure: helpers live in display.js, used by index.js mgmt cycle
 {
   const fs = await import("fs");
   const { fileURLToPath } = await import("url");
   const indexPath = fileURLToPath(new URL("../index.js", import.meta.url));
   const indexSrc = fs.readFileSync(indexPath, "utf8");
-  assert(indexSrc.includes("function fmtAge"), "Index: fmtAge function exists");
-  assert(indexSrc.includes("function fmtFeeTvl"), "Index: fmtFeeTvl function exists");
-  assert(indexSrc.includes("function positionStatusEmoji"), "Index: positionStatusEmoji function exists");
-  assert(indexSrc.includes("function feeTvlBar"), "Index: feeTvlBar function exists");
+  const displaySrc = fs.readFileSync(fileURLToPath(new URL("../display.js", import.meta.url)), "utf8");
+  assert(displaySrc.includes("function fmtAge"), "Display: fmtAge function exists");
+  assert(displaySrc.includes("function fmtFeeTvl"), "Display: fmtFeeTvl function exists");
+  assert(displaySrc.includes("function positionStatusEmoji"), "Display: positionStatusEmoji function exists");
+  assert(displaySrc.includes("function feeTvlBar"), "Display: feeTvlBar function exists");
   // Verify management cycle uses new helpers
   assert(indexSrc.includes("const statusEmoji = positionStatusEmoji(p)"), "Index: mgmt cycle uses positionStatusEmoji");
   assert(indexSrc.includes("const feeBar = feeTvlBar(p.fee_per_tvl_24h)"), "Index: mgmt cycle uses feeTvlBar");
@@ -1619,6 +1598,43 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(startupKeys.has("rpcUrl"), "validator: source scan finds rpcUrl (startup-only key)");
   assert(startupKeys.has("telegramChatId"), "validator: source scan finds telegramChatId");
   assert(startupKeys.has("lockMaxVolatility"), "validator: source scan finds lockMaxVolatility");
+}
+
+// ─── index.js split: display / settings-menu / observe-report ───────────────────
+
+{
+  const fs = await import("fs");
+  const indexSrc = fs.readFileSync("index.js", "utf8");
+  const settingsSrc = fs.readFileSync("settings-menu.js", "utf8");
+  const observeSrc = fs.readFileSync("observe-report.js", "utf8");
+
+  // index.js no longer defines the moved functions, only imports them
+  for (const fn of ["renderSettingsMenu", "applySettingsMenuCallback", "buildObserveReport", "formatHelpText", "feeTvlBar", "htmlEscape"]) {
+    assert(!indexSrc.includes(`function ${fn}(`), `split: ${fn} no longer defined in index.js`);
+  }
+  assert(indexSrc.includes('from "./settings-menu.js"'), "split: index.js imports settings-menu");
+  assert(indexSrc.includes('from "./observe-report.js"'), "split: index.js imports observe-report");
+  assert(indexSrc.includes('from "./display.js"'), "split: index.js imports display");
+
+  // pending-input flow moved behind accessors (state lives in settings-menu.js)
+  assert(settingsSrc.includes("export function takePendingInput"), "split: takePendingInput exported");
+  assert(indexSrc.includes("hasPendingInput()") && indexSrc.includes("takePendingInput()"),
+    "split: index.js consumes pending input via accessors");
+  assert(!indexSrc.includes("_pendingInput"), "split: no direct _pendingInput access left in index.js");
+
+  // settings menu still applies changes through update_config (same validation path)
+  assert(settingsSrc.includes('executeTool("update_config"'), "split: settings menu applies via update_config");
+
+  // observe report keeps parsing both log streams
+  assert(observeSrc.includes("agent-${dateStr}.log") && observeSrc.includes("actions-${dateStr}.jsonl"),
+    "split: observe parses agent log + actions jsonl");
+
+  // display.js functional round-trips (dependency-free module)
+  const d = await import(new URL("../display.js", import.meta.url).href);
+  assertEquals(d.htmlEscape('<b>&"'), "&lt;b&gt;&amp;&quot;", "split: htmlEscape escapes <>&\" ");
+  assertEquals(d.fmtPct(1.234), "1.23%", "split: fmtPct rounds to 2dp");
+  assertEquals(d.fmtPct("x"), "?", "split: fmtPct non-numeric → ?");
+  assert(d.formatHelpText().includes("/settings"), "split: formatHelpText lists /settings");
 }
 
 // ─── Results ──────────────────────────────────────────────────────────────────
