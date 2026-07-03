@@ -12,7 +12,7 @@ import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getPerformanceHistory, listLessons } from "./lessons.js";
-import { executeTool, registerCronRestarter } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, findUnknownUserConfigKeys } from "./tools/executor.js";
 import {
   startPolling,
   stopPolling,
@@ -61,6 +61,10 @@ if (isMain) {
   log("startup", "DLMM LP Agent starting...");
   rotateOldLogs();
   try { archiveClosedPositions(); } catch (e) { log("startup_warn", `Position archive failed: ${e.message}`); }
+  try {
+    const unknownKeys = findUnknownUserConfigKeys();
+    if (unknownKeys.length > 0) log("startup_warn", `user-config.json has unknown keys (not read by anything): ${unknownKeys.join(", ")}`);
+  } catch (e) { log("startup_warn", `Config key validation failed: ${e.message}`); }
   log("startup", `Repo: ${REPO_ROOT} | cwd: ${process.cwd()}${process.env.pm_id ? ` | PM2 id: ${process.env.pm_id}` : ""}`);
   if (path.resolve(process.cwd()) !== path.resolve(REPO_ROOT)) {
     log("startup_warn", `process.cwd() differs from repo root — use "npm run pm2:start" (not "pm2 start index.js" from another directory)`);

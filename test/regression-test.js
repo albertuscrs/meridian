@@ -1596,6 +1596,31 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(pollIdx > -1 && tgSrc.indexOf("loadAllowedUserIds();", pollIdx) > -1, "allowlist: re-loaded in startPolling");
 }
 
+// ─── user-config key validator (executor.js findUnknownUserConfigKeys) ──────────
+
+{
+  const fs = await import("fs");
+  const execSrc = fs.readFileSync("tools/executor.js", "utf8");
+  assert(execSrc.includes("export const CONFIG_MAP"), "validator: CONFIG_MAP hoisted to module scope + exported");
+  assert(execSrc.includes("export const OPERATOR_ONLY_KEYS"), "validator: OPERATOR_ONLY_KEYS exported");
+  assert(execSrc.includes("export function findUnknownUserConfigKeys"), "validator: findUnknownUserConfigKeys exported");
+
+  const indexSrc = fs.readFileSync("index.js", "utf8");
+  assert(indexSrc.includes("findUnknownUserConfigKeys()"), "validator: index.js runs it at startup");
+
+  // Dead key really gone from the LLM-facing update_config key list
+  const defsSrc = fs.readFileSync("tools/definitions.js", "utf8");
+  assert(!defsSrc.includes("maxBundlePct"), "validator: dead maxBundlePct no longer advertised in definitions.js");
+
+  // The config.js source scan finds startup-only keys (mirrors validator logic
+  // without importing executor.js and its SDK chain)
+  const configSrc = fs.readFileSync("config.js", "utf8");
+  const startupKeys = new Set([...configSrc.matchAll(/\bu\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]));
+  assert(startupKeys.has("rpcUrl"), "validator: source scan finds rpcUrl (startup-only key)");
+  assert(startupKeys.has("telegramChatId"), "validator: source scan finds telegramChatId");
+  assert(startupKeys.has("lockMaxVolatility"), "validator: source scan finds lockMaxVolatility");
+}
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log("\n─────────────────────────────────");
