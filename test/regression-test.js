@@ -1637,6 +1637,23 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(d.formatHelpText().includes("/settings"), "split: formatHelpText lists /settings");
 }
 
+// ─── Position strategy label (RPC PnL path) ─────────────────────────────────────
+
+{
+  const fs = await import("fs");
+
+  // RPC PnL path must carry per-position strategy from state — buildPosition
+  // dropped it, so monitoring always showed the hardcoded "spot" fallback.
+  const pnlSrc = fs.readFileSync("tools/pnl.js", "utf8");
+  assert(pnlSrc.includes("strategy:           tracked?.strategy ?? null"),
+    "strategy label: pnl.js buildPosition includes tracked strategy");
+
+  // Display must not pretend unknown strategy is "spot"
+  const indexSrc = fs.readFileSync("index.js", "utf8");
+  assert(!indexSrc.includes('p.strategy ?? "spot"'), "strategy label: no hardcoded spot fallback in displays");
+  assert(indexSrc.includes('p.strategy ?? "?"'), "strategy label: unknown strategy shows ? (honest fallback)");
+}
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log("\n─────────────────────────────────");

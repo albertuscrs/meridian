@@ -235,6 +235,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     age_minutes:        ageMinutes,
     minutes_out_of_range: minutesOutOfRange(f.position),
     instruction:        tracked?.instruction ?? null,
+    strategy:           tracked?.strategy ?? null,
   };
 }
 

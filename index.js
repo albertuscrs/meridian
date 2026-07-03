@@ -450,7 +450,7 @@ export async function runManagementCycle({ silent = false } = {}) {
                         act.action === "CLOSE" ? "⚡ CLOSE" :
                         act.action === "CLAIM" ? "📥 CLAIM" : "";
 
-      const block = [`${statusEmoji} <b>${htmlEscape(p.pair)}</b> | ${p.strategy ?? "spot"}`,
+      const block = [`${statusEmoji} <b>${htmlEscape(p.pair)}</b> | ${p.strategy ?? "?"}`,
         `   💰 ${val} | PnL: ${pnlPctStr} (${pnlUsdStr})`,
         `   📍 ${rangeEmoji} ${rangeLabel} | ⏱ ${ageStr}`,
         `   📈 ${feeBar} ${feeStr24h} | 📥 ${unclaimed} unclaimed`,
@@ -1838,7 +1838,7 @@ async function telegramHandler(msg) {
         const noteLine = p.instruction ? `\n   📝 "${htmlEscape(p.instruction)}"` : "";
 
         return [
-          `${statusEmoji} <b>${i + 1}. ${htmlEscape(p.pair)}</b> | ${p.strategy ?? "spot"}`,
+          `${statusEmoji} <b>${i + 1}. ${htmlEscape(p.pair)}</b> | ${p.strategy ?? "?"}`,
           `   💰 ${valueStr} | PnL: ${pnlPctStr} (${pnlUsdStr})`,
           `   📍 ${rangeEmoji} ${rangeLabel} | ⏱ ${ageStr}`,
           `   📈 ${feeStr24h} | 📥 ${unclaimedStr} unclaimed`,
