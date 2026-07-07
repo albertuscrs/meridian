@@ -1,487 +1,359 @@
-# Meridian — CLAUDE.md
+# Meridian — Operating Manual
 
-Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
+Autonomous DLMM liquidity-provider agent for Meteora pools on Solana.
+
+**This bot is LIVE with real money.** It runs 24/7 in screen session `meridian` (wallet
+`Ckn5Q43mNiEmUvfxiszfLiJ67F4q6hkW4zLbVTXPVCru`), deploying and closing LP positions
+autonomously every few minutes. A bug you ship gets executed against real funds within
+one cron cycle. Work accordingly: verify before restart, test before commit, and when
+in doubt about anything that moves money — stop and ask.
 
 ---
 
-## Architecture Overview
+## Non-Negotiables
+
+1. **Never commit runtime JSON or secrets.** `user-config.json`, `gmgn-config.json`,
+   `state.json`, `.env`, `lessons.json`, `pool-memory.json`, and all other runtime
+   `*.json` are gitignored because they contain keys or live state. Only
+   `*.example.json`, `dev-blocklist.json`, and `package*.json` are tracked. If
+   `git status` shows a runtime JSON as staged, something is wrong — stop.
+2. **Never hardcode API keys in source.** Keys live in `.env` (encrypted via
+   `envcrypt.js`, marked `# encrypted`) and are read through `config.js`.
+3. **Run `node test/regression-test.js` after every code change.** 404/404 must pass.
+   No exceptions for "trivial" changes — the suite is fast and has caught real bugs
+   in one-line diffs.
+4. **Never restart the bot during an active cycle.** See the restart checklist below.
+5. **Never run `evolveThresholds()` (lessons.js) ad-hoc** — it persists mutations to
+   the live `user-config.json`.
+6. **Commit per topic. Push only when explicitly asked, and push to `origin`**
+   (the fork), never `upstream`. End commit messages with the Co-Authored-By line.
+7. **Draft ≠ implement.** When the operator asks for a plan, feasibility check, or
+   draft, do not touch code. Implementation requires explicit approval.
+
+---
+
+## How the Operator Works
+
+- Communicates in casual Indonesian ("bro"). Reply in Indonesian. Code, commits, and
+  docs headers can be English or mixed — match what exists.
+- Wants **root causes, not symptoms**. When something looks wrong in Telegram output
+  or logs, trace it through the pipeline to the source before patching the display.
+- Runs experiments with review dates (tracked in Claude's memory directory — e.g.
+  config threshold changes with a "review by" date). Don't silently change config
+  values that are part of a running experiment.
+- Expects a final summary that leads with what happened, includes commit hashes,
+  and states verification results plainly (including failures).
+- Verification means **exercising the behavior**, not reading the diff: render the
+  Telegram page offline, run the function against live config, read the post-restart
+  log. "Tests pass" alone is not verification for user-facing behavior.
+
+---
+
+## Architecture Map
 
 ```
-index.js            Main entry: REPL + cron orchestration + Telegram bot polling
-agent.js            ReAct loop (OpenRouter/OpenAI-compatible): LLM → tool call → repeat
-config.js           Runtime config from user-config.json + .env; exposes config object
-prompt.js           Builds system prompt per agent role (SCREENER / MANAGER / GENERAL)
-state.js            Position registry (state.json): tracks bin ranges, OOR timestamps, notes
-lessons.js          Learning engine: records closed-position perf, derives lessons, evolves thresholds
-pool-memory.js      Per-pool deploy history + snapshots (pool-memory.json)
-strategy-library.js Saved LP strategies (strategy-library.json)
+index.js            Entry: cron orchestration + Telegram command routing (2.5k lines)
+agent.js            ReAct loop (LLM → tool call → repeat); role tool-sets at :6-7
+config.js           Loads user-config.json + .env at STARTUP ONLY → `config` object
+prompt.js           System prompt per role (SCREENER / MANAGER / GENERAL)
+state.js            Position registry (state.json) + deterministic close rules
+lessons.js          Records closed-position perf, derives lessons, evolves thresholds
+pool-memory.js      Per-pool deploy history + snapshots
+pool-cooldown.js    Post-close cooldowns per pool/mint
+signal-weights.js   Darwinian signal weight evolution (signal-weights.json)
+signal-tracker.js   Stages screening-time signal snapshots for deploy tracking
+strategy-library.js Saved LP strategies
+display.js          Pure formatting helpers (htmlEscape, fmtAge, progress bars)
+settings-menu.js    Entire /settings Telegram UI (settingValue, choiceButton)
+observe-report.js   /observe report builders (log-derived analytics)
 briefing.js         Daily Telegram briefing (HTML)
-telegram.js         Telegram bot: polling, notifications (deploy/close/swap/OOR)
-hive-mind.js        Optional collective intelligence server sync
-smart-wallets.js    KOL/alpha wallet tracker (smart-wallets.json)
-token-blacklist.js  Permanent token blacklist (token-blacklist.json)
-logger.js           Daily-rotating log files + action audit trail
+telegram.js         Bot polling, notifications, rate limiting, user allowlist
+json-store.js       atomicWriteJson / readJsonSafe — ALL JSON persistence goes here
+logger.js           Daily logs: logs/agent-YYYY-MM-DD.log + actions-*.jsonl
 
 tools/
-  definitions.js    Tool schemas in OpenAI format (what LLM sees)
-  executor.js       Tool dispatch: name → fn, safety checks, pre/post hooks
-  dlmm.js           Meteora DLMM SDK wrapper (deploy, close, claim, positions, PnL)
-  screening.js      Pool discovery from Meteora API
-  wallet.js         SOL/token balances (Helius) + Jupiter swap
-  token.js          Token info/holders/narrative (Jupiter API)
-  study.js          Top LPer study via LPAgent API
+  definitions.js    Tool schemas the LLM sees (OpenAI format)
+  executor.js       Tool dispatch + safety checks + CONFIG_MAP + update_config
+  dlmm.js           Meteora DLMM SDK wrapper (deploy/close/claim/positions)
+  pnl.js            RPC-based PnL path (ACTIVE — config.pnl.source = "rpc")
+  screening.js      Pool discovery + scoring (Meteora path)
+  gmgn.js           GMGN screening pipeline + anti-scam filters (ACTIVE source)
+  chart-indicators.js  Supertrend/RSI presets (confirmIndicatorPreset)
+  wallet.js         Balances + Jupiter swap (retry w/ escalating slippage)
+  token.js          Token info/holders (Jupiter API)
+  api-monitor.js    /status health checks for external APIs
 ```
 
----
-
-## Agent Roles & Tool Access
-
-Three agent roles filter which tools the LLM can call:
-
-| Role | Purpose | Key Tools |
-|------|---------|-----------|
-| `SCREENER` | Find and deploy new positions | deploy_position, get_top_candidates, get_token_holders, check_smart_wallets_on_pool |
-| `MANAGER` | Manage open positions | close_position, claim_fees, swap_token, get_position_pnl, set_position_note |
-| `GENERAL` | Chat / manual commands | All tools |
-
-Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant set(s).
+**Currently active in production**: `closeProfile=experimental`, screening source GMGN,
+strategy `bid_ask`, PnL source `rpc`, models per-role via consumer LLM clients
+(MiniMax mgmt/general, Xiaomi screening, OpenRouter fallback).
 
 ---
 
-## Adding a New Tool
+## Named Mistakes (and the rule that prevents each)
 
-1. **`tools/definitions.js`** — Add OpenAI-format schema object to the `tools` array
-2. **`tools/executor.js`** — Add `tool_name: functionImpl` to `toolMap`
-3. **`agent.js`** — Add tool name to `MANAGER_TOOLS` and/or `SCREENER_TOOLS` if role-restricted
-4. If the tool writes on-chain state, add it to `WRITE_TOOLS` in executor.js for safety checks
+These have all actually happened here. Each cost hours. Read before coding.
 
----
+**1. The wrong-pid kill.** `pgrep -f "node index.js"` matches the SCREEN wrapper too
+(its cmdline contains the string), so `kill $(pgrep -f ... | head -1)` kills the
+wrapper and orphans the bot.
+→ Rule: find the pid with `ps -eo pid,ppid,cmd | awk '/node index.js/ && !/SCREEN/ && !/awk/'`
+and SIGINT that pid only.
 
-## Config System
+**2. The mid-cycle restart.** Restarting while a management/screening cycle is running
+can interrupt an in-flight close/deploy transaction.
+→ Rule: before any restart, check today's log for a `Starting management cycle` /
+`Starting screening cycle` line without a matching completion; wait until quiet.
+Use the `restart-bot` skill.
 
-`config.js` loads `user-config.json` at startup. Runtime mutations go through `update_config` tool (executor.js) which:
-- Updates the live `config` object immediately
-- Persists to `user-config.json`
-- Restarts cron jobs if intervals changed
+**3. The half-wired config key.** A new config key has SIX touchpoints. Missing any
+one produces silent breakage: missing `settingValue()` mapping → UI shows "off";
+missing `CONFIG_MAP` entry → `update_config` rejects it; missing from
+`definitions.js` update_config key list → LLM can't set it; missing from config.js →
+startup validator flags it as unknown.
+→ Rule: use the `add-config-key` skill; never wire a key by memory.
 
-**Valid config keys and their sections:**
+**4. The helper mixup.** `numberOrNull()` exists only in `executor.js`;
+`screening.js` has its own `numeric()`. Importing/using the wrong one throws
+`ReferenceError` at runtime — and only on the code path that reaches it.
+→ Rule: before using any helper, grep the current file for its definition or import.
+Never assume a helper exists because another file uses it.
 
-| Key | Section | Default |
-|-----|---------|---------|
-| minFeeActiveTvlRatio | screening | 0.05 |
-| minTvl / maxTvl | screening | 10k / 150k |
-| minVolume | screening | 500 |
-| minOrganic | screening | 60 |
-| minHolders | screening | 500 |
-| minMcap / maxMcap | screening | 150k / 10M |
-| minBinStep / maxBinStep | screening | 80 / 125 |
-| timeframe | screening | "5m" |
-| category | screening | "trending" |
-| minTokenFeesSol | screening | 30 |
-| maxBotHoldersPct | screening | 30 |
-| maxTop10Pct | screening | 60 |
-| blockedLaunchpads | screening | [] |
-| deployAmountSol | management | 0.5 |
-| maxDeployAmount | risk | 50 |
-| maxPositions | risk | 3 |
-| gasReserve | management | 0.2 |
-| positionSizePct | management | 0.35 |
-| minSolToOpen | management | 0.55 |
-| outOfRangeWaitMinutes | management | 30 |
-| managementIntervalMin | schedule | 10 |
-| screeningIntervalMin | schedule | 30 |
-| managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
+**5. The missing import after refactor.** A refactor that rewrites function bodies
+(e.g. json-store adoption) but skips the import compiles fine (`node --check` passes)
+and only explodes when that path runs — in one real case, only screening cycles that
+had deployable candidates crashed, silently, for a day.
+→ Rule: after any mechanical rewrite, grep every touched file for each new function
+name it calls AND its import line. Then run the module functionally
+(`node -e "await import('./file.js')"` + call the changed function) — not just
+`node --check`.
 
-**`computeDeployAmount(walletSol)`** — scales position size with wallet balance (compounding). Formula: `clamp(deployable × positionSizePct, floor=deployAmountSol, ceil=maxDeployAmount)`.
+**6. The unescaped Telegram HTML.** Pool names and close reasons contain `<`, `>`,
+`&` — unescaped, they break Telegram's HTML parser and the message silently fails.
+→ Rule: every dynamic value interpolated into Telegram HTML goes through
+`htmlEscape()` (display.js). No exceptions for "it's just a number" fields that
+could ever be a string.
 
----
+**7. The config import in state.js.** `state.js` deliberately does not import
+`config` — its functions take config values via an `options` parameter (keeps close
+rules testable and dependency-free).
+→ Rule: never add `import { config }` to state.js; thread values through options.
 
-## Position Lifecycle
+**8. The duplicate-const merge.** Upstream merges have introduced duplicate
+`const` declarations (e.g. `BOT_COMMANDS` twice in telegram.js) →
+`SyntaxError: Identifier has already been declared` at startup, i.e. the bot won't
+boot.
+→ Rule: after every merge, `node --check` every conflicted file, then grep each for
+declarations the merge added.
 
-1. **Deploy**: `deploy_position` → executor safety checks → `trackPosition()` in state.js → Telegram notify
-2. **Monitor**: management cron → `getMyPositions()` → `getPositionPnl()` → OOR detection → pool-memory snapshots
-3. **Close**: `close_position` → `recordPerformance()` in lessons.js → auto-swap base token to SOL → Telegram notify
-4. **Learn**: `evolveThresholds()` runs on performance data → updates config.screening → persists to user-config.json
+**9. The upstream clobber.** Upstream refactors have removed local features (real
+case: upstream deleted the `evaluateAndSetCooldown` call in lessons.js — cooldown
+logic is broken upstream; ours works).
+→ Rule: use the `upstream-merge` skill; it carries the keep-local list. Never resolve
+a conflict by wholesale taking either side.
 
----
+**10. The stale-doc trust.** This file and code comments go stale (a past version
+documented `maxBundlersPct`, which never existed — the real key is
+`maxBotHoldersPct`).
+→ Rule: before acting on any key/function/threshold named in docs or memory, grep
+the code to confirm it exists with that exact name.
 
-## Screener Safety Checks (executor.js)
+**11. The config-edit-isn't-live assumption.** `config.js` loads at startup only.
+Editing `user-config.json` does nothing to the running bot.
+→ Rule: apply config changes via Telegram `/settings` (calls `update_config`
+in-process: live + persisted), or edit the file AND restart during a quiet window.
 
-Before `deploy_position` executes:
-- `bin_step` must be within `[minBinStep, maxBinStep]`
-- Position count must be below `maxPositions` (force-fresh scan, no cache)
-- No duplicate pool allowed (same pool_address)
-- No duplicate base token allowed (same base_mint in another pool)
-- Deploy amount must include positive SOL (`amount_y` or `amount_sol`)
-- Range width must be at least the configured safe bins floor (`minBinsBelow`, never below 35)
-- Single-side SOL deploys must keep `bins_above=0`
-- SOL balance must cover `amount_y + gasReserve`
-- `blockedLaunchpads` enforced in `getTopCandidates()` before LLM sees candidates
+**12. The test-log pollution confusion.** Regression tests write into the live daily
+log (fake POOL_XXX / TEST lines). Reading the log right after a test run and treating
+those lines as production events sends you chasing ghosts.
+→ Rule: when reading logs for production behavior, filter for real markers
+(`[CRON]`, `[SCREENING]`, `[STATE]`, `[PNL_TICK]`) and check timestamps against when
+you ran the tests.
 
----
+**13. The phantom verification.** Reporting "fixed" because the diff looks right and
+tests pass, without exercising the actual behavior (the strategy-label bug shipped
+long ago precisely because the field was dropped in a path nobody exercised).
+→ Rule: every user-facing claim in your summary must name the observation that
+backs it: the rendered output, the log line, the function's return value against
+live config.
 
-## bins_below / bins_above (SCREENER)
-
-`bins_below` — linear formula based on pool volatility (set in screener prompt, `index.js`). The lower/upper bounds are configurable, with a hard safety floor of 35 bins:
-
-```
-bins_below = round(minBinsBelow + (volatility / 5) * (maxBinsBelow - minBinsBelow))
-clamped to [minBinsBelow, maxBinsBelow]
-```
-
-- Volatility must be finite and > 0; zero/missing volatility is treated as an unusable feed
-- Low valid volatility → minBinsBelow
-- High volatility (5+) → maxBinsBelow
-- Any value in between is valid (continuous, not tiered)
-
-`bins_above` — fixed config value (`config.strategy.binsAbove`, default 20). For single-sided SOL deploys
-the Meteora protocol requires `upper_bin = active_bin`, so `bins_above` does NOT widen the on-chain LP range.
-Instead it is stored in state (`bin_range.bins_above`) and used by Rule 3 in `getDeterministicCloseRule` to
-add tolerance before triggering an immediate pump-close:
-
-```
-Rule 3 fires when: active_bin > upper_bin + outOfRangeBinsToClose + bin_range.bins_above
-```
-
-Default (outOfRangeBinsToClose=8, binsAbove=20): Rule 3 fires after a ~28-bin pump vs the old 8-bin trigger.
-Positions survive moderate pumps and can resume earning fees when price returns into range.
+**14. The single-file tunnel.** Fixing a bug where it surfaced (e.g. hardcoding a
+fallback in the display) instead of where the data was dropped (the PnL path omitting
+`strategy`).
+→ Rule: for any wrong-value bug, trace: display → position object → source function
+(`getMyPositions` vs `tools/pnl.js buildPosition` — check `config.pnl.source` to know
+which path is live) — fix at the source, make fallbacks honest (`"?"`, not a
+plausible default).
 
 ---
 
-## Telegram Commands
+## Quality Bar Per Deliverable
 
-Handled directly in `index.js` (bypass LLM):
+### Any code change
+- [ ] `node --check` passes on every touched file
+- [ ] `node test/regression-test.js` → 404/404 (or new higher count; document it)
+- [ ] New behavior has regression tests: source-checks (`fs.readFileSync` +
+      `.includes`/regex) for heavy modules (anything importing the DLMM SDK chain),
+      functional imports for light modules (display.js, state.js, signal-weights.js)
+- [ ] Behavior exercised end-to-end at least once (function called with live config,
+      or output rendered) — named in the final summary
+- [ ] One commit per topic; message follows `type(scope): summary` +
+      `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
+- [ ] `git status` clean of runtime JSON; nothing pushed unless asked
 
-| Command | Action |
-|---------|--------|
-| `/positions` | List open positions with progress bar |
-| `/close <n>` | Close position by list index |
-| `/set <n> <note>` | Set note on position by list index |
+### New tool (LLM-callable)
+- [ ] Schema in `tools/definitions.js` tools array
+- [ ] `tool_name: fn` in executor.js `toolMap`
+- [ ] Added to `MANAGER_TOOLS` / `SCREENER_TOOLS` (agent.js:6-7) if role-scoped —
+      otherwise it's GENERAL-only (this has been missed before: `get_wallet_positions`)
+- [ ] If it writes on-chain: added to `WRITE_TOOLS` in executor.js
 
-Progress bar format: `[████████░░░░░░░░░░░░] 40%` (no bin numbers, no arrows)
+### New config key (use the add-config-key skill)
+- [ ] Read + default in `config.js` (correct section)
+- [ ] `CONFIG_MAP` entry in executor.js (or `OPERATOR_ONLY_KEYS` if Telegram-only)
+- [ ] Listed in `update_config` schema keys in definitions.js (if LLM-settable)
+- [ ] `settingValue()` mapping in settings-menu.js if it appears in /settings
+- [ ] Multi-choice rows use `choiceButton()` (renders ✓ on the active choice)
+- [ ] Regression tests for default + wiring; startup validator
+      (`findUnknownUserConfigKeys`) does not flag it
+- [ ] Documented in this file's config table if screening/risk/management-relevant
 
----
+### Bot restart (use the restart-bot skill)
+- [ ] Pre: no active cycle in today's log; no in-flight transaction
+- [ ] Kill: SIGINT to the node pid (not the SCREEN wrapper); confirm exit
+- [ ] Relaunch: `screen -dmS meridian bash -c "cd /home/ubuntu/projects/meridian && node index.js"`
+- [ ] Post (within ~2 min): `[STARTUP]` line present; zero `ERROR`/`CRON_ERROR` since
+      startup; `[PNL_TICK] poller alive` appears; `[CRON] Cycles started` appears;
+      Telegram polling registered; open positions still tracked (`/positions`)
 
-## Race Condition: Double Deploy
+### Telegram-facing output
+- [ ] All dynamic strings through `htmlEscape()`
+- [ ] Progress bars/emoji follow existing format (`[████░░] 40%`, status emoji
+      ⚪🟢🟡🟠🔴) — don't invent new visual language
+- [ ] Rendered offline against live config before shipping (import the builder,
+      print the result)
 
-`_screeningLastTriggered` in index.js prevents concurrent screener invocations. Management cycle sets this before triggering screener. Also, `deploy_position` safety check uses `force: true` on `getMyPositions()` for a fresh count.
+### Docs / plans
+- [ ] Lives in `docs/`, SCREAMING_SNAKE name
+- [ ] Status header (`PLAN / DRAFT — not implemented` vs implemented + date)
+- [ ] Claims about the codebase carry `file.js:line` references verified this session
+- [ ] Staged work marked with explicit go/no-go gates
 
----
-
-## Bundler Detection (token.js)
-
-Two signals used in `getTokenHolders()`:
-- `common_funder` — multiple wallets funded by same source
-- `funded_same_window` — multiple wallets funded in same time window
-
-**Thresholds in config**: `maxBotHoldersPct` (default 30%), `maxTop10Pct` (default 60%)
-Jupiter audit API: `botHoldersPercentage` (5–25% is normal for legitimate tokens)
-
----
-
-## Base Fee Calculation (dlmm.js)
-
-Read from pool object at deploy time:
-```js
-const baseFactor = pool.lbPair.parameters?.baseFactor ?? 0;
-const actualBaseFee = baseFactor > 0
-  ? parseFloat((baseFactor * actualBinStep / 1e6 * 100).toFixed(4))
-  : null;
-```
-
----
-
-## Model Configuration
-
-- Default model: `process.env.LLM_MODEL` or `openrouter/healer-alpha`
-- Fallback on 502/503/529: `stepfun/step-3.5-flash:free` (2nd attempt), then retry
-- Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json
-- LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`
-- `maxOutputTokens` minimum: 2048 (free models may have lower limits causing empty responses)
-
----
-
-## Lessons System
-
-`lessons.js` records closed position performance and auto-derives lessons. Key points:
-- `getLessonsForPrompt({ agentType })` — injects relevant lessons into system prompt
-- `evolveThresholds()` — adjusts screening thresholds based on winners vs losers
-- Performance recorded via `recordPerformance()` called from executor.js after `close_position`
-- `evolveThresholds()` adjusts both `maxVolatility` (`config.screening.maxVolatility`) and `minFeeActiveTvlRatio` (`config.screening.minFeeActiveTvlRatio`) — both keys are correct and evolution is functional
+### Upstream merge (use the upstream-merge skill)
+- [ ] Keep-local list checked item by item after resolution
+- [ ] `node --check` on every conflicted file; grep for duplicate declarations
+- [ ] Full test suite passes; restart verified per checklist
 
 ---
 
-## Pool Cooldown System (pool-cooldown.js)
+## When to Stop and Ask
 
-After each position close, `evaluateAndSetCooldown()` determines appropriate cooldown periods based on the close reason and PnL severity. Cooldowns prevent re-deployment to poorly performing pools/tokens.
+Ask **before** acting, even if you could proceed:
 
-**Close reasons and their default cooldowns:**
+1. Anything that changes **risk or money parameters**: stop loss, emergency close,
+   position sizing, maxPositions, deploy amounts — unless the exact value was given.
+2. **Closing/opening a live position** or any manual on-chain action not explicitly
+   requested this session.
+3. **Pushing to any remote**, force-pushing, rebasing published history, or touching
+   `upstream`.
+4. **Deleting or truncating** any runtime data file (state.json, lessons.json,
+   pool-memory.json, logs). Archival additions are fine; destruction is not.
+5. Implementing anything from a **draft/plan doc** — each stage needs its own go.
+6. Restart wanted but **cycles won't go quiet** or a transaction may be in flight.
+7. A fix requires choosing between **two behaviorally different interpretations**
+   of what the operator wants (e.g. hold vs close semantics) — one-sentence question
+   beats a wrong guess executed by a live bot.
+8. You found evidence of a **live incident** (error cascade in logs, position
+   untracked, PnL wildly off): report findings first; do not hot-patch unprompted.
 
-| Reason | Cooldown | Description |
-|--------|----------|-------------|
-| `low yield` | 4h | Insufficient fee generation |
-| `stop loss` | 2h | Hit stop-loss trigger |
-| `loss > 1%` | 1h | Manual close at loss >1% (not stop loss) |
-| `oor big loss` | 6h | OOR close + pnlUsd < oorBigLossPnlThreshold (-$2) |
-| `cumulative loss > $5` | 48h | Total pool loss across all deploys exceeds threshold |
-| `oor` (repeated) | 12h | 3+ OOR closes in succession |
-| `manual` | 1h | User-initiated close |
-| `trailing tp` / `take profit` | 1-2h | Successful exits |
-
-**Key rules:**
-- When multiple cooldowns apply, the **longest duration wins**
-- Stop loss, OOR big loss, and cumulative loss > $5 trigger **base-mint cooldowns** (applies to all pools using that token)
-- OOR big loss threshold: `oorBigLossPnlThreshold` (default -$2)
-- Cumulative loss = sum of all `pnlUsd` in pool's deploy history + new close's `pnlUsd`; threshold is `cumulativeLossThreshold` (default -$5)
-- Loss > 1% cooldown triggers only for manual/user-requested closes with pnlPct < -1% (and NOT stop loss)
-
-**New config keys (management section):**
-
-| Key | Default |
-|-----|---------|
-| lowYieldCooldownHours | 4 |
-| stopLossCooldownHours | 2 |
-| lossGt1PctCooldownHours | 1 |
-| oorBigLossCooldownHours | 6 |
-| oorBigLossPnlThreshold | -2 |
-| cumulativeLossCooldownHours | 48 |
-| cumulativeLossThreshold | -5 |
+Do NOT ask (just do it): reading anything, running tests, offline rendering,
+git commits on the current branch, updating docs to match code you changed,
+scratchpad experiments.
 
 ---
 
-## Hive Mind (hive-mind.js)
+## Reference
 
-Optional feature. Enabled by setting `HIVE_MIND_URL` and `HIVE_MIND_API_KEY` in `.env`.
-Syncs lessons/deploys to a shared server, queries consensus patterns.
-Not required for normal operation.
+### Config system
+`config.js` reads `user-config.json` + `.env` at startup into the `config` object.
+Runtime changes go through the `update_config` tool (executor.js), which mutates the
+live object, persists the file, and restarts crons if intervals changed. Key sections:
+`screening`, `gmgn`, `management`, `risk`, `strategy`, `schedule`, `llm`, `indicators`,
+`darwin`, `pnl`. Grep `config.js` for the authoritative key list — a startup validator
+(`findUnknownUserConfigKeys`, executor.js) warns about unknown keys in the log.
 
----
+`computeDeployAmount(walletSol)`: `clamp(deployable × positionSizePct, floor=deployAmountSol, ceil=maxDeployAmount)`.
 
-## Environment Variables
+### Position lifecycle
+1. **Deploy**: `deploy_position` → executor safety checks → `trackPosition()`
+   (state.js) → signal snapshot attach (signal-tracker.js, called from tools/dlmm.js)
+   → Telegram notify
+2. **Monitor**: management cron → `getMyPositions()` (source: `tools/pnl.js` when
+   `pnl.source=rpc`) → close-rule evaluation → pool-memory snapshots; 3s PnL poller
+   drives trailing-TP/emergency checks
+3. **Close**: `close_position` → `recordPerformance()` (lessons.js) →
+   `evaluateAndSetCooldown()` (pool-cooldown.js) → auto-swap base→SOL → notify
+4. **Learn**: `evolveThresholds()` on schedule (adjusts `maxVolatility`,
+   `minFeeActiveTvlRatio`); Darwinian weights recalc from signal snapshots
 
-| Var | Required | Purpose |
-|-----|----------|---------|
-| `WALLET_PRIVATE_KEY` | Yes | Base58 or JSON array private key |
-| `RPC_URL` | Yes | Solana RPC endpoint |
-| `OPENROUTER_API_KEY` | Yes | LLM API key |
-| `TELEGRAM_BOT_TOKEN` | No | Telegram notifications |
-| `TELEGRAM_CHAT_ID` | No | Telegram chat target |
-| `LLM_BASE_URL` | No | Override for local LLM (e.g. LM Studio) |
-| `LLM_MODEL` | No | Override default model |
-| `DRY_RUN` | No | Skip all on-chain transactions |
-| `HIVE_MIND_URL` | No | Collective intelligence server |
-| `HIVE_MIND_API_KEY` | No | Hive mind auth token |
-| `HELIUS_API_KEY` | No | Enhanced wallet balance data |
+### Deploy safety checks (executor.js, before deploy_position)
+bin_step within [minBinStep, maxBinStep] · position count < maxPositions (fresh scan)
+· no duplicate pool · no duplicate base mint · positive SOL amount · range ≥ safe-bins
+floor (minBinsBelow, hard floor 35) · single-side SOL keeps `bins_above=0` (double-sided
+is hard-blocked at dlmm.js:655) · balance covers amount + gasReserve · blockedLaunchpads
+filtered pre-LLM.
 
----
+### bins_below / bins_above
+`bins_below = round(minBinsBelow + (volatility/5) × (maxBinsBelow − minBinsBelow))`,
+clamped, volatility must be finite > 0 (zero/missing = unusable feed).
+`bins_above` (default 20) does NOT widen the on-chain range on single-sided deploys —
+it is stored in state and widens Rule 3's pump-close tolerance:
+Rule 3 fires when `active_bin > upper_bin + outOfRangeBinsToClose + bins_above`.
 
-## Close Profile System
-
-Three behavioral profiles for close rules, set via `config.management.closeProfile`:
-
+### Close profiles (`config.management.closeProfile`)
 | Profile | R4 OOR | R7 Safety-Lock | R8 Indicator | Rule 0 Emergency |
-|---------|--------|----------------|--------------|------------------|
-| `main` | Time-based (35m above / 8m below) | No | No | Yes (all profiles) |
-| `pecut` | Time-based + Safety-Lock | Yes | No | Yes |
-| `experimental` | Time-based + Safety-Lock + R8 | Yes | Yes | Yes |
+|---|---|---|---|---|
+| `main` | time-based | no | no | yes |
+| `pecut` | + Safety-Lock | yes | no | yes |
+| `experimental` (ACTIVE) | + Safety-Lock + R8 | yes | yes | yes |
 
-**Active in production:** `experimental` (since 2026-05-12)
+- **Rule 0 Emergency** (`emergencyClosePct`): fires before ALL rules incl. R1;
+  bypasses locks/cooldowns. Log: `[STATE] Emergency close:`. The PnL poller checks
+  the emergency floor BEFORE the peak gate (do not reorder — that ordering fixed a
+  real -36% undetected loss).
+- **R7 Safety-Lock**: OOR timeout but pnl ≤ 0 → hold. Log: `[STATE] Safety-Lock:`
+- **R8**: pre-fetch indicators before OOR close; `confirmed:false` → hold; fail-open
+  on API error. Gate order: OOR timeout → trailingArmed? → R7 → R8 → close.
+- **R4.1 Trailing TP**: Rule 2 always returns `TRAILING_TP_QUEUED` — timer-confirmed
+  (3s pecut / 15s main+experimental), never instant-close.
 
-**Rule 0 Emergency Close** (`config.management.emergencyClosePct`, default -10): Hard override at catastrophic PnL threshold. Fires BEFORE all other rules — bypasses Safety-Lock, R8, trailing, and cooldown entirely. Log marker: `[STATE] Emergency close:`. Configurable via `/settings` Risk page.
+### Pool cooldowns (pool-cooldown.js, on every close)
+low yield 4h · stop loss 6h · loss>1% manual 1h · OOR big loss 6h (pnl <
+`oorBigLossPnlThreshold`, −$2) · cumulative pool loss > $5 → 48h · 3+ repeated OOR
+12h · manual 1h · TP exits 1-2h. Longest wins. Stop loss / OOR-big-loss / cumulative
+also cool the **base mint** across pools. Catastrophic SL (pnl ≤ −10%) →
+permanent blacklist (same threshold as `emergencyClosePct`).
 
-**R7 Safety-Lock** (`pecut` + `experimental`): if OOR timeout reached but `pnl_pct ≤ 0`, hold instead of close. Log marker: `[STATE] Safety-Lock:`
+### Telegram commands (handled in index.js, bypass LLM)
+`/positions` `/close <n>` `/set <n> <note>` `/settings` `/performance`
+`/status apis|relay|hivemind|gmgn|jupiter|meteora|rpc` `/observe …`
 
-**R8 Indicator-Aware OOR** (`experimental` only): pre-fetches chart indicators before closing OOR positions. If `confirmIndicatorPreset()` returns `confirmed: false`, hold. Fail-open: API unavailable → close normally (never blocks on error).
-- Config: `r8IndicatorCheck` (toggle), `r8ExitPreset` (preset name), `r8OorCooldownHours`
-- Gate order: OOR timeout → trailingArmed? → R7 Safety-Lock → R8 → OUT_OF_RANGE
-- Rule 0 Emergency fires BEFORE everything (even before R1 Stop Loss)
+### Environment variables
+Required: `WALLET_PRIVATE_KEY`, `RPC_URL`, `OPENROUTER_API_KEY`.
+Optional: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `LLM_BASE_URL`, `LLM_MODEL`,
+`DRY_RUN` (skip on-chain), `HIVE_MIND_URL`/`HIVE_MIND_API_KEY`, `HELIUS_API_KEY`.
+`.env` is encrypted (envcrypt.js) — scripts must `await import("./envcrypt.js")` first.
 
-**R4.1 Trailing TP** (all profiles): state.js Rule 2 always returns `{ action: "TRAILING_TP_QUEUED" }` — callers schedule timer-based confirmation (3s pecut / 15s main+experimental). Never instant-close.
+### Tests
+`node test/regression-test.js` — 404 inline tests (R-rules, F1 signal tracker, fee
+drift, time-of-day, PnL poll gap, GMGN settings, Jupiter API, volume trend, display
+helpers, Telegram rate limiter, allowed-user read-back, config validator, index split,
+settings ✓ marks, json-store adoption scan). Also `test/pool-cooldown-test.js`,
+`test/test-solmode-pnl.js`. Heavy modules are source-checked; light modules imported
+functionally. Scripts importing `@solana/web3.js` must run from the project dir
+(node_modules resolution), not /tmp.
 
----
-
-## Darwinian Signal Wiring (F1 — FIXED 2026-05-17)
-
-`getAndClearStagedSignals()` (signal-tracker.js) is now called from `tools/dlmm.js` at both `trackPosition()` call sites. Signal snapshots are stored in state.json + lessons.json and feed the Darwinian weight evolution loop.
-
-`signal-tracker.js` supports dual-index lookup: by `poolAddress` (primary) or `baseMint` (fallback, for cases where deploy pool address differs from screened pool).
-
----
-
-## Regression Tests
-
-`test/regression-test.js` — 35 inline unit tests covering all custom R-implementations.
-Run: `node test/regression-test.js`
-
-| Test group | Cases | What it covers |
-|------------|-------|----------------|
-| R1 Stop Loss | 4 | threshold boundary, suspicious pnl bypass |
-| R2/R4.1 Trailing TP | 4 | always queued, not instant-close |
-| R7 Safety-Lock | 7 | pecut+experimental, above+below, pnl=0 edge, main no-lock |
-| R8 Indicator-Aware | 6 | hold/close/fail-open/profile guard/trailing bypass |
-| R5 Low Yield | 4 | age gate, custom minAgeBeforeYieldCheck |
-| F1 signal-tracker | 7 | pool lookup, base_mint fallback, clear-after-retrieval |
-| Telegram rate limiter | 38 | 5s dedup, exp backoff, 1-retry, 401/400 no-backoff, cap at 30s |
-
-Also: `test/pool-cooldown-test.js` (6 cooldown scenarios), `test/test-solmode-pnl.js` (SOL mode PnL).
-
----
-
-## Known Issues / Tech Debt
-
-- `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
-
-## Recent Additions (May 2026)
-
-### API Monitoring (`tools/api-monitor.js`)
-Telegram `/status` subcommands check health of all external APIs:
-- `/status apis` — all APIs (relay, hivemind, gmgn, jupiter, meteora, rpc)
-- `/status relay|hivemind|gmgn|jupiter|meteora|rpc` — individual checks
-Each shows ✅/❌ status, HTTP code, latency, error details.
-
-### Consumer LLM Clients (`agent.js`)
-Three-tier client architecture for LLM routing:
-- `client` (global): MiniMax API for management/general
-- `getScreeningClient()`: Xiaomi endpoint for screening (mimo-v2.5)
-- `getFallbackClient()`: OpenRouter for fallback (stepfun/step-3.5-flash:free)
-Config: `screeningBaseUrl`, `screeningApiKey`, `fallbackBaseUrl`, `fallbackApiKey`, `fallbackModel`.
-
-### Swap Retry (`tools/wallet.js`)
-Swap retries up to 5x with escalating slippage (0.5%→10%).
-Telegram notification on exhaustion via `notifySwapFailure()`.
-
-### Launchpad Filtering for GMGN (`tools/gmgn.js`)
-GMGN screening pipeline now filters `blockedLaunchpads` at Stage 2.
-Previously only Meteora pipeline had this filter.
-
-### Screening Cooldown (`index.js`)
-Management cycle respects `screeningIntervalMin` when triggering screening on no-position.
-No longer spams screening every 3 minutes when no positions open.
-
----
-
-## Session Notes (2026-05-23 to 2026-06-16)
-
-### What Was Done
-
-**Fee Drift Detection (Tier 2)**
-- Layer 1: `fee_change_pct` filter in screening + deploy (zero API cost)
-- Layer 2: Cross-timeframe fee/TVL spike check (1h vs 24h) at deploy time
-- 7 config keys: `feeDriftCheck`, `maxFeeDeclinePct`, `feeSpikeCheck`, `feeSpikeShortTimeframe`, `feeSpikeLongTimeframe`, `feeSpikeMaxRatio`, `feeSpikeMinShortFeeTvl`
-
-**Config Tuning (Tier 3)**
-- `stopLossCooldownHours`: 2 → 6 (prevent fast re-deploy into SL'd pools)
-- `minVolatility`: null → 3.5 (reduce pump-frequency pools)
-
-**Base-mint Blacklist on Catastrophic SL (Tier 4)**
-- `pool-cooldown.js`: if SL + `pnlPct ≤ -10%` → `addToBlacklist()` permanent
-- Uses same threshold as `emergencyClosePct`
-
-**Time-of-Day Awareness (Tier 5)**
-- Young tokens (<24h) blocked during risky UTC windows (00-04, 16-17)
-- Config: `timeOfDayCheck`, `riskyHours`, `minTokenAgeForTimeCheck`
-
-**PnL Poll Gap Fix (Critical)**
-- Bug: `queuePeakConfirmation()` peak gate blocked Rule 0 evaluation when PnL descending
-- Embrace case: +0.59% → -36% undetected for 25 minutes
-- Fix: Emergency floor check BEFORE peak gate in `state.js`
-- Throttled diagnostic log (5 min/position) for forensic trail
-
-**Performance Dashboard**
-- `/performance` command: 24h/7d/30d/all-time stats
-- Shows: win rate, PnL, fees, best/worst pools, close reason breakdown
-
-**Log Rotation**
-- `rotateOldLogs()` at startup, 7-day retention (`LOG_RETENTION_DAYS`)
-- Cleans `agent-*.log`, `actions-*.jsonl`, `snapshots-*.jsonl`
-
-**GMGN Settings Reorganization**
-- GMGN page: volume/size filters (mcap, volume, holders)
-- Safety page: 10 anti-scam filters (bundler, rat trader, fresh wallet, dev hold, rug ratio, sniper, etc.)
-- Indicators page: GMGN indicator filter, BB position toggle, RSI/Supertrend settings
-- 3 new CONFIG_MAP entries: `gmgnMaxRugRatio`, `gmgnRejectSingleVolumeSpike`, `gmgnMaxSingleCandleVolumeShare`
-
-**Jupiter API Fix**
-- `quote-api.jup.ag` DNS dead → switched to `api.jup.ag/price/v3`
-- Removed hardcoded API key from `wallet.js` → reads from `.env` via config
-- Health check now sends `x-api-key` header
-
-**Upstream Merge**
-- 3 commits: auto-register Telegram commands, DeepSeek thinking mode fix, false volume=0 screening fix
-
-**Telegram 504 Rate-Limit Fix (S5)**
-- Root cause: `createTypingIndicator` self-rescheduled `sendChatAction` every 4s with no dedup
-- Multiple concurrent indicators (management + ad-hoc) flooded Telegram → 504 cascade on `sendMessage` too
-- Fix: 5s dedup window, exponential backoff (5→10→20→30s cap), 1-retry on 5xx for `sendMessage`
-- 38 new regression tests (T9.1-T9.10 + source checks) — total 303/304 pass
-- Files: `telegram.js` (+~100 LOC), `test/regression-test.js` (+~200 LOC)
-- Helper exports `_resetChatActionStateForTests` for unit test isolation
-
-### What to Avoid
-
-1. **Never use `numberOrNull` in `screening.js`** — that function only exists in `executor.js`. Use `numeric()` which is already defined in `screening.js`.
-
-2. **Never hardcode API keys in source code** — always read from `.env` via `config.js`. The `.env` file uses `envcrypt.js` for encryption. Keys go in `.env` with `# encrypted` marker.
-
-3. **Never import `config` in `state.js`** — `state.js` doesn't import config. Pass config values via `options` parameter to functions.
-
-4. **Never add duplicate `const` declarations** — upstream merge added duplicate `BOT_COMMANDS` in `telegram.js` which caused `SyntaxError: Identifier has already been declared`. Always check for existing declarations before merging.
-
-5. **Never forget `htmlEscape()` for Telegram HTML** — pool names and close reasons can contain `<`, `>`, `=` which break Telegram's HTML parser. Always escape dynamic content.
-
-6. **Never use `settingValue()` without adding mapping** — when adding new config keys to `/settings` UI, you MUST also add the key→config mapping in `settingValue()` function, otherwise it shows "off".
-
-7. **Don't restart bot during active cycles** — check logs for `Starting management cycle` or `Starting screening cycle` before restarting. Wait for cycle to finish.
-
-### What Worked Well
-
-1. **Regression tests caught bugs early** — 176 tests covering R-implementations, fee drift, time-of-day, PnL poll gap, GMGN settings, Jupiter API. Run `node test/regression-test.js` after every change.
-
-2. **Two-layer fee drift detection** — Layer 1 (fee_change_pct) is free, Layer 2 (cross-timeframe) adds 1 API call only at deploy time. Fail-open design prevents false rejections.
-
-3. **Surgical PnL poll gap fix** — Adding emergency check BEFORE peak gate (not rewriting peak logic) preserved trailing TP behavior while fixing catastrophic loss detection.
-
-4. **`settingValue()` pattern for Telegram UI** — Centralized config→UI mapping makes it easy to add new settings. Just add key to `settingValue()` and create button.
-
-5. **CONFIG_MAP pattern for executor** — All config keys mapped in one place. Easy to verify coverage by grepping gmgn-config.json keys against CONFIG_MAP.
-
-6. **`numeric()` vs `numberOrNull()`** — Different files use different helpers. `screening.js` uses `numeric()`, `executor.js` uses `numberOrNull()`. Don't mix them.
-
-7. **Data-validated screening filters** — Volume Trend Acceleration. User provided closed-position data: 558 positions, ALL catastrophic losses cluster in pools with `volume_change_pct < -10%`. Adding `volume_trend` field + score boost +100 for accelerating pools + GMGN enrichment (1 API call) + hard-block option (default off) was a 173-line change that closed a real data gap.
-
-8. **Surgical upstream merge for massive refactor** — `5fae0c5` (612 deletions, 333 additions) conflicted in 5 files with our local R-implementations. Resolved manually keeping all local features (Fee Drift CONFIG_MAP, OPERATOR_ONLY_KEYS, displayPnlPct, maxVolatility evolution). 8 conflict files resolved in ~30 min.
-
-9. **Visual management display helpers** — `fmtAge` (formats `83m` → `1h 23m`), `positionStatusEmoji` (5-level status: ⚪/🟢/🟡/🟠/🔴), `feeTvlBar` (visual bar `▁▂▃▄▅▆` based on yield magnitude). Multi-line layout per position makes mgmt cycle reports scannable in Telegram. User asked for "more intuitive" — 4 helpers + 48 regression tests (303/304 pass) in 173-line change.
-
-10. **Upstream RPC PnL + GMGN fee source merge** — 5 upstream commits (905305b + 4 fixes) integrated in single merge. 8 conflict files (config.js, index.js, lessons.js, briefing.js, tools/dlmm.js, tools/executor.js, tools/gmgn.js, tools/token.js). Key kept-local: `evaluateAndSetCooldown` call in lessons.js (upstream removed it → cooldown logic broken upstream). RPC PnL uses Meteora DLMM SDK on public RPC, no LPAgent dependency. New config keys: `pnlSource`, `pnlRpcUrl`, `pnlPollIntervalSec`, `pnlDepositCacheTtlSec`, `gmgnFeeSource`.
-
-11. **Telegram 504 rate-limit fix (S5)** — User diagnosed root cause instantly (`sendChatAction` flooding). `createTypingIndicator` self-rescheduled every 4s with no dedup. When multiple indicators overlap (management + ad-hoc), bot floods Telegram with 1-2 calls/sec → 504 cascade. Fix: 5s dedup window, exponential backoff (5s→10s→20s→30s cap), 1-retry on 5xx for `sendMessage`. 38 new tests covering dedup, backoff, retry logic, status classification. Net +39 tests (265→303/304). User's hypothesis was the smoking gun — they nailed it in one sentence.
-
----
-
-## Regression Tests (Updated)
-
-`test/regression-test.js` — 303 inline unit tests.
-Run: `node test/regression-test.js`
-
-| Test group | Cases | What it covers |
-|------------|-------|----------------|
-| R1 Stop Loss | 4 | threshold boundary, suspicious pnl bypass |
-| R2/R4.1 Trailing TP | 4 | always queued, not instant-close |
-| R7 Safety-Lock | 7 | pecut+experimental, above+below, pnl=0 edge |
-| R8 Indicator-Aware | 6 | hold/close/fail-open/profile guard/trailing bypass |
-| R5 Low Yield | 4 | age gate, custom minAgeBeforeYieldCheck |
-| F1 signal-tracker | 7 | pool lookup, base_mint fallback, clear-after-retrieval |
-| Fee Drift | 31 | Layer 1 decline, Layer 2 spike, config, executor, screening |
-| Config Tuning | 4 | minVolatility, stopLossCooldownHours defaults |
-| Catastrophic SL | 7 | blacklist logic, threshold alignment |
-| Time-of-Day | 18 | risky windows, safe windows, age threshold, config |
-| Log Rotation | 6 | rotateOldLogs function, startup call |
-| Performance | 7 | /performance command, getPerformanceHistory |
-| PnL Poll Gap | 14 | emergency before peak gate, diagnostic log |
-| GMGN Settings | 39 | CONFIG_MAP, Safety page, Volume page, Indicators |
-| Jupiter API | 14 | health check, API key, URL constants |
-| Agent allowSkip | 4 | option, signature, mustUseRealTool bypass |
-| Volume Trend | 37 | classification, custom thresholds, score boost, deploy validation, code structure |
-| Mgmt Display | 48 | fmtAge (1h 23m format), positionStatusEmoji (5-level), feeTvlBar (6 tiers), yield with /24h |
-| Telegram rate limiter | 38 | 5s dedup, exp backoff, 1-retry, 401/400 no-backoff, cap at 30s, multi-indicator dedup |
+### Git
+Branch `experimental`; PRs target `main`. `origin` = albertuscrs fork (push target),
+`upstream` = yunus-0x (fetch only). Untracked `posters_for_x/` belongs to the
+operator — never touch, never commit.
