@@ -45,11 +45,21 @@ operator** — do not force it.
 
 ## Step 2 — Kill the node process (NOT the screen wrapper)
 
-`pgrep -f "node index.js"` matches the SCREEN wrapper too. Always resolve the real pid:
+`pgrep -f "node index.js"` matches the SCREEN wrapper too. Always resolve the real pid
+— and note the cmdline can be relative (`node index.js`) OR full-path
+(`node /home/ubuntu/projects/meridian/index.js`), so match on `index.js`, not the
+literal `node index.js`:
 
 ```bash
-ps -eo pid,ppid,cmd | awk '/node index\.js/ && !/SCREEN/ && !/awk/'
+ps -eo pid,ppid,cmd | awk '/node .*meridian\/index\.js|node index\.js/ && !/SCREEN/ && !/awk/'
 ```
+
+**If this prints MORE than one row, stop — duplicate instances.** A second instance
+has come from PM2 resurrect before (systemd `pm2-ubuntu.service` + a stale
+`~/.pm2/dump.pm2` revived a `meridian` app on reboot, 2026-07-06 → every Telegram
+message answered twice, two management crons racing each other). Check `pm2 list`;
+if a PM2-managed copy exists, remove it with `pm2 delete meridian && pm2 save --force`
+(the `save` is what stops it resurrecting on the next reboot).
 
 The row shown is `PID PPID cmd` — the PPID is the screen wrapper; SIGINT the PID:
 
@@ -98,7 +108,11 @@ eyeball that any hits predate the startup timestamp.)
    (`N position(s) tracked`). A drop to 0 with positions open on-chain is an
    incident — report immediately, do not "fix" state.json by hand.
 
-7. Watch one full management cycle complete without errors before declaring success:
+7. **Exactly one instance**: the Step 2 `ps` command prints exactly one row, and
+   `pm2 list` shows no `meridian` app. Duplicated `[CRON] Starting management cycle`
+   lines (~1s apart each tick) in the log are the signature of a second instance.
+
+8. Watch one full management cycle complete without errors before declaring success:
 
 ```bash
 n=0; until tail -5 "logs/agent-$(date -u +%F).log" | grep -qE "cycle (complete|finished)"; do

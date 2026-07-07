@@ -98,9 +98,12 @@ These have all actually happened here. Each cost hours. Read before coding.
 
 **1. The wrong-pid kill.** `pgrep -f "node index.js"` matches the SCREEN wrapper too
 (its cmdline contains the string), so `kill $(pgrep -f ... | head -1)` kills the
-wrapper and orphans the bot.
-→ Rule: find the pid with `ps -eo pid,ppid,cmd | awk '/node index.js/ && !/SCREEN/ && !/awk/'`
-and SIGINT that pid only.
+wrapper and orphans the bot. Beware also: the cmdline can be full-path
+(`node /home/ubuntu/projects/meridian/index.js`), which `/node index\.js/` does NOT
+match — that blind spot hid a duplicate instance for 33 hours (see #15).
+→ Rule: find the pid with
+`ps -eo pid,ppid,cmd | awk '/node .*meridian\/index\.js|node index\.js/ && !/SCREEN/ && !/awk/'`
+and SIGINT that pid only. More than one row → stop, see #15.
 
 **2. The mid-cycle restart.** Restarting while a management/screening cycle is running
 can interrupt an in-flight close/deploy transaction.
@@ -186,6 +189,18 @@ fallback in the display) instead of where the data was dropped (the PnL path omi
 (`getMyPositions` vs `tools/pnl.js buildPosition` — check `config.pnl.source` to know
 which path is live) — fix at the source, make fallbacks honest (`"?"`, not a
 plausible default).
+
+**15. The PM2 resurrect double-instance.** Real incident 2026-07-06→08: a server
+reboot made systemd's `pm2-ubuntu.service` resurrect a stale `meridian` app from
+`~/.pm2/dump.pm2` (saved months earlier), while the screen instance was relaunched
+manually — TWO live bots for 33h. Symptoms: every Telegram message answered twice,
+`Starting management cycle` in pairs ~1s apart, RPC 429 storms, and the two
+instances racing on the same position (one closed while the other decided to hold).
+→ Rule: after any reboot or restart, verify exactly ONE instance: the #1 `ps`
+command prints one row AND `pm2 list` has no `meridian` app. If PM2 has one:
+`pm2 delete meridian && pm2 save --force` (the save stops the next-reboot
+resurrect). Duplicate `Incoming:` lines in the log = two pollers, go look for the
+second process.
 
 ---
 
