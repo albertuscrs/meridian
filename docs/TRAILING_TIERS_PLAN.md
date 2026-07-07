@@ -147,7 +147,12 @@ PnL per posisi resolusi ~3 detik. Window tersedia: 7 hari (2026-07-01 → 07-07)
 
 ---
 
-## Stage A — Quick win flat (config-only, NOL kode) — GATE: persetujuan operator
+## Stage A — Quick win flat (config-only, NOL kode) — ✅ APPLIED 2026-07-07
+
+**Status: AKTIF sejak 2026-07-07 08:02 UTC** — operator apply via /settings
+(`trailingTriggerPct 2.5`, `trailingDropPct 1.5`; verified live setelah restart
+18:23 UTC). Review ~2026-07-21. Detail eksperimen di memory
+`trailing-stage-a-experiment`.
 
 Ini perubahan parameter uang — butuh nilai eksplisit dari operator. Flat tidak bisa
 melebar per level (itu kerjaan Stage B), tapi ada dua tweak murah selagi Stage B
@@ -160,7 +165,8 @@ dibangun:
   tujuan).
 - Terapkan via Telegram `/settings` (live tanpa restart).
 - Perlakukan sebagai eksperimen ala operator: catat tanggal + review date (~2 minggu),
-  bandingkan realized exit + fee capture vs baseline dengan skill `lp-eval`.
+  bandingkan realized exit + fee capture vs baseline (tabel Phase 0/0.5 di atas;
+  rerun analisis wiggle dengan log segar — metodologi di bagian bawah dokumen ini).
 - **Go/no-go Stage B ditentukan setelah data Stage A masuk.**
 
 ## Stage B — Implementasi `trailingTiers` (kode) — GATE: go terpisah
