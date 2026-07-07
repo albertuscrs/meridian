@@ -62,19 +62,25 @@ In `settings-menu.js`:
 
 ```bash
 node --check config.js tools/executor.js settings-menu.js tools/definitions.js
-node -e '
+node --input-type=module -e '
   const { config } = await import("./config.js");
   console.log("live value:", /* config.<section>.myNewKey */ );
   const { settingValue, renderSettingsMenu } = await import("./settings-menu.js");
   console.log("settingValue:", settingValue("myNewKey"));
   // For UI keys: render the page and eyeball the button labels + ✓ placement
   console.log(JSON.stringify(renderSettingsMenu("<page>"), null, 1));
-' --input-type=module
-node -e 'const { findUnknownUserConfigKeys } = await import("./tools/executor.js");
-  console.log("unknown:", findUnknownUserConfigKeys());' --input-type=module
+  process.exit(0);   // REQUIRED — module-scope timers keep the event loop alive; without this the script hangs forever
+'
+node --input-type=module -e '
+  const { findUnknownUserConfigKeys } = await import("./tools/executor.js");
+  console.log("unknown:", findUnknownUserConfigKeys());
+  process.exit(0);
+'
 ```
 
-The `unknown:` list must not contain the new key.
+The `unknown:` list must not contain the new key. (Verified working 2026-07-07 —
+without `process.exit(0)` these imports hang: telegram/executor modules start
+intervals at module scope.)
 
 ## Step 6 — Regression tests (test/regression-test.js)
 

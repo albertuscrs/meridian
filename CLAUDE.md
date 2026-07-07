@@ -84,9 +84,11 @@ tools/
   api-monitor.js    /status health checks for external APIs
 ```
 
-**Currently active in production**: `closeProfile=experimental`, screening source GMGN,
-strategy `bid_ask`, PnL source `rpc`, models per-role via consumer LLM clients
-(MiniMax mgmt/general, Xiaomi screening, OpenRouter fallback).
+**Live production values drift — never trust a doc snapshot.** Check what's actually
+active before reasoning about behavior:
+`node --input-type=module -e 'const {settingValue} = await import("./settings-menu.js"); console.log(settingValue("closeProfile"), settingValue("screeningSource"), settingValue("strategy")); process.exit(0)'`
+(As of 2026-07-07: closeProfile `pecut`, screening GMGN, strategy `bid_ask`, PnL
+source `rpc`, per-role consumer LLM clients — but verify, don't assume.)
 
 ---
 
@@ -315,7 +317,7 @@ Rule 3 fires when `active_bin > upper_bin + outOfRangeBinsToClose + bins_above`.
 |---|---|---|---|---|
 | `main` | time-based | no | no | yes |
 | `pecut` | + Safety-Lock | yes | no | yes |
-| `experimental` (ACTIVE) | + Safety-Lock + R8 | yes | yes | yes |
+| `experimental` | + Safety-Lock + R8 | yes | yes | yes |
 
 - **Rule 0 Emergency** (`emergencyClosePct`): fires before ALL rules incl. R1;
   bypasses locks/cooldowns. Log: `[STATE] Emergency close:`. The PnL poller checks
