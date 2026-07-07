@@ -5,11 +5,16 @@
 > dan analisis data peak PnL. Semua referensi `file.js:line` diverifikasi 2026-07-07.
 > Setiap stage butuh go eksplisit dari operator.
 
-## Ide
+## Ide & Tujuan
 
 Trailing TP yang sekarang flat (`trailingTriggerPct=3`, `trailingDropPct=1.1` di
-user-config live). Ide dari draft Hermes: drop tolerance melebar seiring profit naik —
-profit kecil di-trail ketat, runner besar dikasih napas.
+user-config live). Tujuan operator (klarifikasi 2026-07-07): **opportunity capture** —
+selama pool masih eligible (in-range, fee masih ngalir), jangan biarkan wiggle kecil
+menendang posisi keluar; kasih napas melebar seiring profit naik supaya fee terus
+terakumulasi. Ini BUKAN fitur proteksi profit — proteksi sudah dipegang Rule 0/R1.
+Framing ini penting: analisis apa pun yang hanya menghitung "exit di peak−drop"
+undervalue policy yang lebar, karena tidak memodelkan fee yang terus masuk selama
+posisi bertahan.
 
 ---
 
@@ -64,11 +69,55 @@ Rezim recent (sejak risk change 2026-06-21, n=62): max peak 6.28%, tidak ada yan
    wick transien, fill jauh di bawah garis saat dump cepat, dan memotong posisi yang
    masih menghasilkan fee (biaya kesempatan tidak dimodelkan).
 
-### Kesimpulan Phase 0
+### Kesimpulan Phase 0 (direvisi setelah klarifikasi tujuan)
 
-Nilai terbesar yang tersedia adalah **retune parameter flat** (config-only, nol kode,
-reversible). Tiers layak dibangun hanya sebagai penyempurnaan kecil di atasnya —
-ketat di bawah, longgar di atas — bukan sebagai ladder 6 tingkat.
+Simulasi peak-based valid untuk membunuh ladder Hermes (threshold 7.5-15% tidak pernah
+tersentuh) tapi **bias untuk tujuan opportunity capture**: distribusi peak historis
+tersensor oleh policy closing itu sendiri (posisi yang dipotong drop 1.1 di 4% tidak
+pernah sempat menunjukkan peak 8%), dan exit dini yang "menang" di simulasi tidak
+membayar fee yang hilang. Kesimpulan "tighter is better" dari simulasi ini TIDAK
+dipakai untuk desain — lihat Phase 0.5.
+
+---
+
+## Phase 0.5 — Analisis Wiggle In-Range (SELESAI 2026-07-07)
+
+Sumber data yang tidak tersensor arah: `[PnL poll diag]` di log harian — time series
+PnL per posisi resolusi ~3 detik. Window tersedia: 7 hari (2026-07-01 → 07-07),
+36 posisi, 149 episode drawdown (depth > 0.05pt). Episode = turun dari running max;
+"recovered" = balik bikin high baru; "terminal" = tidak pernah balik (close/akhir data).
+
+### Depth drawdown per level profit saat drawdown mulai (pnl-pt)
+
+| Bucket | Recovered: n / p50 / p90 / p95 / max | Terminal: n / max |
+|---|---|---|
+| 0-2% | 98 / 0.20 / 1.59 / 2.88 / 5.11 | 6 / 16.23 |
+| 2-4% | 31 / 0.25 / **1.72** / 1.82 / 3.00 | 2 / 4.61 |
+| 4-6% | 9 / 0.19 / 1.04 / 1.04 / 1.04 | 2 / 1.27 |
+| ≥6% | 1 / 0.21 | 0 |
+
+### Survival rate wiggle-recoverable per kandidat dropPct (bucket 2-4% / 4-6%)
+
+| dropPct | 2-4% | 4-6% |
+|---|---|---|
+| 0.9 | 74% | 89% |
+| **1.1 (live)** | **77%** | 100% |
+| 1.5 | 84% | 100% |
+| **1.8** | **94%** | 100% |
+| 2.2 | 97% | 100% |
+
+### Temuan Phase 0.5
+
+1. **Intuisi operator terkonfirmasi**: di zona profit 2-4%, drop 1.1 yang sekarang
+   memotong ~23% wiggle yang sebenarnya recover (akan bikin high baru). Melebarkan
+   ke 1.8 menaikkan survival ke 94%.
+2. Biaya pelebarannya kecil: terminal dump di zona itu (n=2) depth-nya 4.61pt —
+   menembus drop lebar mana pun; biaya marginal 1.1→1.8 ≈ 0.7pt ekstra giveback per
+   terminal, vs 17-20% lebih banyak posisi yang tetap hidup dan terus menghasilkan.
+3. Caveat: window cuma 7 hari / 36 posisi; bucket atas sample tipis; confirm window
+   3s (pecut) sudah menolak sebagian wick transien, jadi survival real di 1.1
+   sedikit lebih baik dari angka mentah. Ulangi analisis ini saat mau menetapkan
+   angka final (metodologi di bawah).
 
 ---
 
@@ -98,33 +147,40 @@ ketat di bawah, longgar di atas — bukan sebagai ladder 6 tingkat.
 
 ---
 
-## Stage A — Retune flat (config-only, NOL kode) — GATE: persetujuan operator
+## Stage A — Quick win flat (config-only, NOL kode) — GATE: persetujuan operator
 
-Ini perubahan parameter uang — butuh nilai eksplisit dari operator.
+Ini perubahan parameter uang — butuh nilai eksplisit dari operator. Flat tidak bisa
+melebar per level (itu kerjaan Stage B), tapi ada dua tweak murah selagi Stage B
+dibangun:
 
-- Usulan berdasarkan simulasi + margin keamanan terhadap bias-ketat:
-  `trailingTriggerPct 3 → 2.5`, `trailingDropPct 1.1 → 0.9`.
-  (Simulasi bilang 1.5/0.7 paling tinggi, tapi itu di ujung bias optimis — jangan
-  lompat ke sana; turunkan bertahap dan ukur.)
+- `trailingTriggerPct 3 → 2.5` (arming lebih awal — 40% cohort armed historis ada
+  di [3, 3.5); menangkap lebih banyak posisi ke dalam rezim trailing).
+- `trailingDropPct 1.1 → 1.5` (kompromi satu-angka ke arah capture: survival 2-4%
+  naik 77%→84% tanpa menunggu tiers; JANGAN 0.9 — itu arah proteksi, kebalikan
+  tujuan).
 - Terapkan via Telegram `/settings` (live tanpa restart).
 - Perlakukan sebagai eksperimen ala operator: catat tanggal + review date (~2 minggu),
-  bandingkan realized exit vs baseline dengan skill `lp-eval`.
+  bandingkan realized exit + fee capture vs baseline dengan skill `lp-eval`.
 - **Go/no-go Stage B ditentukan setelah data Stage A masuk.**
 
 ## Stage B — Implementasi `trailingTiers` (kode) — GATE: go terpisah
 
-Bentuk config (maks 3 tier):
+Bentuk config (maks 3 tier), arah **melebar ke atas** (opportunity capture — dari
+data Phase 0.5):
 
 ```json
 "trailingTiers": [
-  { "abovePct": 2.5, "dropPct": 0.9 },
-  { "abovePct": 5,   "dropPct": 1.2 },
-  { "abovePct": 8,   "dropPct": 1.8 }
+  { "abovePct": 2.5, "dropPct": 1.2 },
+  { "abovePct": 4,   "dropPct": 1.8 },
+  { "abovePct": 6,   "dropPct": 2.2 }
 ]
 ```
 
-(Angka final di-anchor ke data Stage A saat go diberikan — jangan pakai tabel ini
-mentah-mentah tanpa cek ulang distribusi terbaru.)
+Rasional: tier 1 ≈ ketatnya sekarang (profit kecil, tidak banyak yang dilindungi);
+tier 2 di zona 4%+ pakai 1.8 (survival wiggle 94% di bucket yang wiggle-nya paling
+besar); tier 3 = opsi murah pada ekor — jarang aktif, dan kalau aktif membiarkan
+posisi ride. (Angka final di-anchor ulang: jalankan lagi analisis Phase 0.5 dengan
+log terbaru saat go Stage B diberikan.)
 
 1. **Config key** via skill `add-config-key`, dengan catatan khusus:
    - Array-of-objects → TIDAK masuk `CONFIG_MAP`/LLM-settable (parseConfigValue tidak
@@ -163,7 +219,15 @@ Checklist quality bar CLAUDE.md "Any code change" + "New config key" berlaku pen
 
 ## Metodologi analisis (untuk diulang nanti)
 
-Join `state-archive.jsonl` + `state.json` closed (`peak_pnl_pct`) dengan
-`lessons.json` performance (`pnl_pct`, `close_reason`) key `position`; simulasi
-`exit = peak ≥ arm ? max(final, peak − drop(tier(peak))) : final`. Jalankan ulang
-dengan window recent untuk rezim saat ini sebelum menetapkan angka.
+**Phase 0 (distribusi peak, tersensor policy):** join `state-archive.jsonl` +
+`state.json` closed (`peak_pnl_pct`) dengan `lessons.json` performance (`pnl_pct`,
+`close_reason`) key `position`; simulasi
+`exit = peak ≥ arm ? max(final, peak − drop(tier(peak))) : final`.
+
+**Phase 0.5 (wiggle, tidak tersensor arah — INI yang dipakai untuk sizing drop):**
+parse `[PnL poll diag]` dari `logs/agent-*.log`
+(regex `pos pnl=X% peak=Y% in_range=bool`), per posisi bentuk episode drawdown dari
+running max; klasifikasi recovered (balik bikin high baru) vs terminal; bucket by
+profit level saat mulai; hitung survival rate per kandidat dropPct. Filter posisi
+test (POOL_XXX) — log dipollusi regression test. Retensi log terbatas (~7-14 hari),
+jadi jalankan segera sebelum menetapkan angka, jangan pakai angka basi.
