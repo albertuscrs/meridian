@@ -930,7 +930,7 @@ console.log("\n── GMGN Settings: CONFIG_MAP + UI structure ──");
 
   // Test 3: All volume keys have CONFIG_MAP entry
   const volumeKeys = [
-    "gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume",
+    "gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume", "gmgnMinTvl",
     "gmgnAthFilterPct", "gmgnMinHolders", "gmgnHoldersLimit"
   ];
   for (const key of volumeKeys) {
@@ -965,12 +965,33 @@ console.log("\n── GMGN Settings: CONFIG_MAP + UI structure ──");
   assert(settingsSrc.includes("gmgnMinHolders"), "Settings: Min holders button exists");
   assert(settingsSrc.includes("gmgnHoldersLimit"), "Settings: Holders limit button exists");
 
+  // Test 5b: gmgnMinTvl fully wired (button + settingValue mapping + page routing)
+  assert(settingsSrc.includes('inputButton("gmgnMinTvl"'), "Settings: Min pool TVL button exists");
+  assert(settingsSrc.includes("gmgnMinTvl: config.gmgn.minTvl"),
+    "Settings: gmgnMinTvl settingValue mapping present");
+  assert((settingsSrc.match(/"gmgnMinTvl",/g) || []).length >= 2,
+    "Settings: gmgnMinTvl in both page-routing arrays (input + post-update)");
+
   // Test 6: Indicators page — requireBbPosition toggle
   assert(settingsSrc.includes("gmgnRequireBbPosition"), "Settings: Require BB position toggle exists");
   assert(settingsSrc.includes("gmgnIndicatorFilter"), "Settings: GMGN indicator filter toggle exists");
 
   // Test 7: Page routing includes safety keys
   assert(settingsSrc.includes('"safety"'), "Settings: Safety page routing exists");
+}
+
+{
+  const fs = await import("fs");
+
+  // Test 8: gmgnMinTvl wired end-to-end outside settings-menu
+  const defsSrc = fs.readFileSync(new URL("../tools/definitions.js", import.meta.url), "utf8");
+  assert(defsSrc.includes("gmgnMinTvl"), "Definitions: gmgnMinTvl in update_config key list");
+  const configSrc = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
+  assert(configSrc.includes('gmgnValue("minTvl", "gmgnMinTvl"'),
+    "Config: gmgn.minTvl reads gmgn-config minTvl with gmgnMinTvl legacy fallback");
+  const gmgnSrc = fs.readFileSync(new URL("../tools/gmgn.js", import.meta.url), "utf8");
+  assert(/g\.minTvl \?\? config\.screening\.minTvl/.test(gmgnSrc),
+    "GMGN: pool filter reads config.gmgn.minTvl before screening fallback");
 }
 
 

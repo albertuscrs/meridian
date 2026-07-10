@@ -72,6 +72,7 @@ export function settingValue(key) {
     gmgnInterval: config.gmgn.interval,
     gmgnIndicatorFilter: config.gmgn.indicatorFilter,
     gmgnMinVolume: config.gmgn.minVolume,
+    gmgnMinTvl: config.gmgn.minTvl,
     gmgnMinTokenAgeHours: config.gmgn.minTokenAgeHours,
     gmgnMaxTokenAgeHours: config.gmgn.maxTokenAgeHours,
     gmgnMaxBundlerRate: config.gmgn.maxBundlerRate,
@@ -307,6 +308,7 @@ export function renderSettingsMenu(page = "main") {
         inputButton("gmgnAthFilterPct", "ATH filter %", { digits: 0 })[0],
         inputButton("gmgnHoldersLimit", "Holders limit")[0],
       ],
+      inputButton("gmgnMinTvl", "Min pool TVL ($)"),
       [
         inputButton("gmgnMinTokenAgeHours", "Min token age (h)")[0],
         inputButton("gmgnMaxTokenAgeHours", "Max token age (h)")[0],
@@ -433,7 +435,7 @@ export async function applySettingsMenuCallback(msg) {
     const currentVal = settingValue(inputKey);
     const inputPage = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(inputKey) ? "kol"
       : ["gmgnMaxTop10HolderRate", "gmgnMaxBundlerRate", "gmgnMaxRatTraderRate", "gmgnMaxFreshWalletRate", "gmgnMaxDevTeamHoldRate", "gmgnMaxBotDegenRate", "gmgnMaxRugRatio", "gmgnMaxSniperCount", "gmgnMaxSniperHoldRate", "gmgnMinSmartDegenCount", "gmgnRequireKol", "gmgnMinKolCount", "gmgnMinTotalFeeSol"].includes(inputKey) ? "safety"
-      : ["gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume", "gmgnAthFilterPct", "gmgnMinHolders", "gmgnHoldersLimit", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(inputKey) ? "gmgn"
+      : ["gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume", "gmgnMinTvl", "gmgnAthFilterPct", "gmgnMinHolders", "gmgnHoldersLimit", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(inputKey) ? "gmgn"
       : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" || inputKey === "gmgnIndicatorFilter" || inputKey === "gmgnRequireBbPosition" || inputKey === "gmgnIndicatorInterval" || inputKey === "gmgnRequireBullishSt" || inputKey === "gmgnRejectAtBottom" || inputKey === "gmgnRequireAboveSt" || inputKey === "gmgnMinRsi" || inputKey === "gmgnMaxRsi" ? "indicators"
       : ["minBinsBelow", "maxBinsBelow"].includes(inputKey) ? "strategy"
       : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource"].includes(inputKey) ? "screen"
@@ -497,7 +499,7 @@ export async function applySettingsMenuCallback(msg) {
   }
   page = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(key) ? "kol"
     : ["gmgnMaxTop10HolderRate", "gmgnMaxBundlerRate", "gmgnMaxRatTraderRate", "gmgnMaxFreshWalletRate", "gmgnMaxDevTeamHoldRate", "gmgnMaxBotDegenRate", "gmgnMaxRugRatio", "gmgnMaxSniperCount", "gmgnMaxSniperHoldRate", "gmgnMinSmartDegenCount", "gmgnRequireKol", "gmgnMinKolCount", "gmgnMinTotalFeeSol"].includes(key) ? "safety"
-    : ["gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume", "gmgnAthFilterPct", "gmgnMinHolders", "gmgnHoldersLimit", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(key) ? "gmgn"
+    : ["gmgnMinMcap", "gmgnMaxMcap", "gmgnMinVolume", "gmgnMinTvl", "gmgnAthFilterPct", "gmgnMinHolders", "gmgnHoldersLimit", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(key) ? "gmgn"
     : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals" || key === "gmgnIndicatorFilter" || key === "gmgnRequireBbPosition" || key === "gmgnIndicatorInterval" || key === "gmgnRequireBullishSt" || key === "gmgnRejectAtBottom" || key === "gmgnRequireAboveSt" || key === "gmgnMinRsi" || key === "gmgnMaxRsi" ? "indicators"
     : ["minBinsBelow", "maxBinsBelow"].includes(key) ? "strategy"
     : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "volumeTrendFilter", "volumeTrendAccelThreshold", "volumeTrendDecelThreshold", "volumeTrendBlockDecel", "lockMaxVolatility"].includes(key) ? "screen"

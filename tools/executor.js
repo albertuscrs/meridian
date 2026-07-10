@@ -420,6 +420,7 @@ export const CONFIG_MAP = {
   gmgnMinMcap: ["gmgn", "minMcap"],
   gmgnMaxMcap: ["gmgn", "maxMcap"],
   gmgnMinVolume: ["gmgn", "minVolume"],
+  gmgnMinTvl: ["gmgn", "minTvl"],
   gmgnMinHolders: ["gmgn", "minHolders"],
   gmgnMinTokenAgeHours: ["gmgn", "minTokenAgeHours"],
   gmgnMaxTokenAgeHours: ["gmgn", "maxTokenAgeHours"],
