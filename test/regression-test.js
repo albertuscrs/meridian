@@ -992,6 +992,22 @@ console.log("\n── GMGN Settings: CONFIG_MAP + UI structure ──");
   const gmgnSrc = fs.readFileSync(new URL("../tools/gmgn.js", import.meta.url), "utf8");
   assert(/g\.minTvl \?\? config\.screening\.minTvl/.test(gmgnSrc),
     "GMGN: pool filter reads config.gmgn.minTvl before screening fallback");
+
+  // Test 9: balance-fetch failure is reported honestly, not as "insufficient SOL 0.000"
+  const idxSrc = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  assert(idxSrc.includes("preBalance.error"),
+    "Index: screening pre-check inspects preBalance.error");
+  assert(idxSrc.includes("balance unavailable"),
+    "Index: balance-fetch failure logs 'balance unavailable', not insufficient SOL");
+  assert(idxSrc.indexOf("preBalance.error") < idxSrc.indexOf("preBalance.sol < minRequired"),
+    "Index: error check runs BEFORE the insufficient-SOL comparison");
+
+  // Test 10: pnl.rpcUrl falls back to main RPC_URL before the public pump endpoint
+  assert(/rpcUrl: nonEmptyString\(u\.pnlRpcUrl, process\.env\.PNL_RPC_URL, process\.env\.RPC_URL, "https:\/\/pump\.helius-rpc\.com"\)/.test(configSrc),
+    "Config: pnl.rpcUrl chain is pnlRpcUrl → PNL_RPC_URL → RPC_URL → pump default");
+  const dlmmSrc = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  assert(dlmmSrc.includes('config.pnl.rpcUrl.replace(/api-key=[^&]+/, "api-key=***")'),
+    "DLMM: PnL RPC log line masks the api-key");
 }
 
 

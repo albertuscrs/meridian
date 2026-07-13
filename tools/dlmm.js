@@ -1284,7 +1284,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     // fully public resources. Falls through to the Meteora-API path on any error.
     if (config.pnl.source === "rpc") {
       try {
-        if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
+        if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl.replace(/api-key=[^&]+/, "api-key=***")})...`);
         const rpcResult = await computePositions(walletAddress);
         if (useLocalWallet) {
           syncOpenPositions(rpcResult.positions.map((p) => p.position));

@@ -586,6 +586,20 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
     const minRequired = config.management.deployAmountSol + config.management.gasReserve;
     const isDryRun = process.env.DRY_RUN === "true";
+    if (!isDryRun && preBalance.error) {
+      // Fetch failed → sol is a placeholder 0, not a real balance. Skip honestly
+      // instead of reporting "insufficient SOL 0.000" (fail-closed either way).
+      log("cron", `Screening skipped — balance unavailable (${preBalance.error})`);
+      screenReport = `Screening skipped — balance unavailable (${preBalance.error}).`;
+      appendDecision({
+        type: "skip",
+        actor: "SCREENER",
+        summary: "Screening skipped",
+        reason: `Balance unavailable (${preBalance.error})`,
+      });
+      _screeningBusy = false;
+      return screenReport;
+    }
     if (!isDryRun && preBalance.sol < minRequired) {
       log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
       screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
