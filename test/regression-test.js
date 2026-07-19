@@ -72,6 +72,7 @@ function makeConfig(overrides = {}) {
     trailingDropPct: 0.5,
     outOfRangeWaitMinutes: 35,
     outOfRangeBelowWaitMinutes: 8,
+    outOfRangeAboveMaxHoldMinutes: 120,
     minFeePerTvl24h: 6,
     minAgeBeforeYieldCheck: 60,
     r8IndicatorCheck: true,
@@ -120,17 +121,28 @@ function checkExitsLogic(pos, positionData, mgmtConfig, indicatorData = null) {
     if (active_bin != null && upper_bin != null && active_bin > upper_bin) {
       const oorLimit = trailingArmed ? 0 : (mgmtConfig.outOfRangeWaitMinutes ?? 35);
       if (minutesOOR >= oorLimit) {
+        // Max-Hold cap (mirrors state.js): frozen-PnL holds force-close at the cap
+        const maxHoldMinutes = mgmtConfig.outOfRangeAboveMaxHoldMinutes ?? 120;
+        const maxHoldReached = minutesOOR >= maxHoldMinutes;
         // R7: Safety-Lock
-        if ((profile === "pecut" || profile === "experimental") && (currentPnlPct == null || currentPnlPct <= 0)) {
+        const safetyLockHold = (profile === "pecut" || profile === "experimental") && (currentPnlPct == null || currentPnlPct <= 0);
+        if (safetyLockHold && !maxHoldReached) {
           return null; // hold
         }
         // R8: Indicator-Aware
-        if (profile === "experimental" && mgmtConfig.r8IndicatorCheck && indicatorData && !trailingArmed) {
+        let r8Hold = false;
+        if (!safetyLockHold && profile === "experimental" && mgmtConfig.r8IndicatorCheck && indicatorData && !trailingArmed) {
           if (!indicatorData.confirmed) {
-            return null; // hold
+            r8Hold = true;
+            if (!maxHoldReached) return null; // hold
           }
         }
-        return { action: "OUT_OF_RANGE", reason: `OOR above for ${minutesOOR}m`, profile };
+        const cappedOut = maxHoldReached && (safetyLockHold || r8Hold);
+        return {
+          action: "OUT_OF_RANGE",
+          reason: cappedOut ? `OOR above for ${minutesOOR}m (max hold: ${maxHoldMinutes}m)` : `OOR above for ${minutesOOR}m`,
+          profile,
+        };
       }
     }
 
@@ -336,6 +348,63 @@ console.log("\n── R8: Indicator-Aware OOR ──");
   const indicator = { confirmed: false, reason: "supertrend_break not confirmed" };
   const result = checkExitsLogic(pos, data, makeConfig({ closeProfile: "pecut" }), indicator);
   assertEquals(result?.action, "OUT_OF_RANGE", "R8: pecut profile → R8 gate skipped, closes normally");
+}
+
+
+// ─── SECTION 4b: Max-Hold cap on OOR-above holds ─────────────────────────────
+
+console.log("\n── Max-Hold: OOR-above hold cap ──");
+
+{
+  // pecut + OOR above 130m + pnl 0.0% → 120m cap overrides Safety-Lock, closes
+  const pos = posOOR(130);
+  const data = makePositionData({ pnl_pct: 0.0, in_range: false, active_bin: 1200, upper_bin: 1100 });
+  const result = checkExitsLogic(pos, data, makeConfig({ closeProfile: "pecut" }));
+  assertEquals(result?.action, "OUT_OF_RANGE", "Max-Hold: pecut OOR above 130m pnl 0.0% → cap overrides Safety-Lock, closes");
+  assert(String(result?.reason ?? "").includes("max hold"), "Max-Hold: close reason names the max-hold cap");
+}
+
+{
+  // pecut + OOR above 119m + pnl 0.0% → still under cap, Safety-Lock holds
+  const pos = posOOR(119);
+  const data = makePositionData({ pnl_pct: 0.0, in_range: false, active_bin: 1200, upper_bin: 1100 });
+  const result = checkExitsLogic(pos, data, makeConfig({ closeProfile: "pecut" }));
+  assertNull(result, "Max-Hold: pecut OOR above 119m < 120m cap → Safety-Lock still holds");
+}
+
+{
+  // experimental + OOR above 130m + pnl 0.5% + R8 not confirmed → cap overrides R8 hold
+  const pos = posOOR(130);
+  const data = makePositionData({ pnl_pct: 0.5, in_range: false, active_bin: 1200, upper_bin: 1100 });
+  const indicator = { confirmed: false, reason: "supertrend_break not confirmed" };
+  const result = checkExitsLogic(pos, data, makeConfig({ closeProfile: "experimental" }), indicator);
+  assertEquals(result?.action, "OUT_OF_RANGE", "Max-Hold: experimental OOR above 130m R8-unconfirmed → cap overrides R8 hold");
+  assert(String(result?.reason ?? "").includes("max hold"), "Max-Hold: R8-override reason names the max-hold cap");
+}
+
+{
+  // pecut + OOR BELOW 130m + pnl -0.5% → cap does NOT apply below; Safety-Lock still holds
+  const pos = posOOR(130);
+  const data = makePositionData({ pnl_pct: -0.5, in_range: false, active_bin: 800, lower_bin: 900, upper_bin: 1100 });
+  const result = checkExitsLogic(pos, data, makeConfig({ closeProfile: "pecut" }));
+  assertNull(result, "Max-Hold: OOR below is untouched — Safety-Lock holds past 120m");
+}
+
+{
+  // custom cap honored: 60m cap, 70m OOR, pnl 0.0 → closes
+  const pos = posOOR(70);
+  const data = makePositionData({ pnl_pct: 0.0, in_range: false, active_bin: 1200, upper_bin: 1100 });
+  const result = checkExitsLogic(pos, data, makeConfig({ closeProfile: "pecut", outOfRangeAboveMaxHoldMinutes: 60 }));
+  assertEquals(result?.action, "OUT_OF_RANGE", "Max-Hold: custom cap 60m honored at 70m OOR");
+}
+
+{
+  // main profile at 130m: closes via normal OOR timeout, reason stays plain (nothing overridden)
+  const pos = posOOR(130);
+  const data = makePositionData({ pnl_pct: -2.0, in_range: false, active_bin: 1200, upper_bin: 1100 });
+  const result = checkExitsLogic(pos, data, makeConfig({ closeProfile: "main" }));
+  assertEquals(result?.action, "OUT_OF_RANGE", "Max-Hold: main profile closes via normal OOR timeout");
+  assert(!String(result?.reason ?? "").includes("max hold"), "Max-Hold: main-profile reason stays plain (nothing overridden)");
 }
 
 {
@@ -1008,6 +1077,27 @@ console.log("\n── GMGN Settings: CONFIG_MAP + UI structure ──");
   const dlmmSrc = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
   assert(dlmmSrc.includes('config.pnl.rpcUrl.replace(/api-key=[^&]+/, "api-key=***")'),
     "DLMM: PnL RPC log line masks the api-key");
+
+  // Test 11: outOfRangeAboveMaxHoldMinutes wired end-to-end (max-hold cap for OOR-above holds)
+  assert(configSrc.includes("outOfRangeAboveMaxHoldMinutes: u.outOfRangeAboveMaxHoldMinutes ?? 120"),
+    "Config: outOfRangeAboveMaxHoldMinutes default 120 in management section");
+  const execSrc = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
+  assert(execSrc.includes('outOfRangeAboveMaxHoldMinutes: ["management", "outOfRangeAboveMaxHoldMinutes"]'),
+    "Executor: outOfRangeAboveMaxHoldMinutes in CONFIG_MAP");
+  assert(defsSrc.includes("outOfRangeAboveMaxHoldMinutes"),
+    "Definitions: outOfRangeAboveMaxHoldMinutes in update_config Management key list");
+  const stateSrc = fs.readFileSync(new URL("../state.js", import.meta.url), "utf8");
+  assert(stateSrc.includes("outOfRangeAboveMaxHoldMinutes") && stateSrc.includes("max hold:"),
+    "State: R4-above max-hold cap implemented with honest close reason");
+  assert(stateSrc.indexOf("outOfRangeAboveMaxHoldMinutes") < stateSrc.indexOf("Safety-Lock:"),
+    "State: cap computed BEFORE the Safety-Lock hold can return");
+  assert(idxSrc.includes("outOfRangeAboveMaxHoldMinutes"),
+    "Index: Rule 3 Pump-Hold has the max-hold cap");
+  assert(idxSrc.indexOf("outOfRangeAboveMaxHoldMinutes") < idxSrc.indexOf("Pump-Hold:"),
+    "Index: cap checked BEFORE the Pump-Hold return");
+  const menuSrc = fs.readFileSync(new URL("../settings-menu.js", import.meta.url), "utf8");
+  assert(menuSrc.includes("max-hold ${config.management.outOfRangeAboveMaxHoldMinutes}m"),
+    "Settings: max-hold shown in the OOR snapshot line");
 }
 
 

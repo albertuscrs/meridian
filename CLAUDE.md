@@ -338,7 +338,12 @@ Rule 3 fires when `active_bin > upper_bin + outOfRangeBinsToClose + bins_above`.
   bypasses locks/cooldowns. Log: `[STATE] Emergency close:`. The PnL poller checks
   the emergency floor BEFORE the peak gate (do not reorder — that ordering fixed a
   real -36% undetected loss).
-- **R7 Safety-Lock**: OOR timeout but pnl ≤ 0 → hold. Log: `[STATE] Safety-Lock:`
+- **R7 Safety-Lock**: OOR timeout but pnl ≤ 0 → hold. Log: `[STATE] Safety-Lock:`.
+  Above-range holds (R7 + Rule 3 Pump-Hold) are capped by
+  `outOfRangeAboveMaxHoldMinutes` (default 120m): above range the position is pure
+  SOL with frozen PnL, so the gates can never clear on their own — force close at
+  the cap (log `Max-Hold:`, reason `OOR above for Xm (max hold: Ym)`). Below-range
+  holds are uncapped.
 - **R8**: pre-fetch indicators before OOR close; `confirmed:false` → hold; fail-open
   on API error. Gate order: OOR timeout → trailingArmed? → R7 → R8 → close.
 - **R4.1 Trailing TP**: Rule 2 always returns `TRAILING_TP_QUEUED` — timer-confirmed

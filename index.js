@@ -1190,6 +1190,15 @@ function getDeterministicCloseRule(position, managementConfig) {
     if (profile === "pecut" || profile === "experimental") {
       const minProfitGate = managementConfig.minProfitPctToCloseOOR ?? 0;
       if (position.pnl_pct == null || position.pnl_pct < minProfitGate) {
+        // Max-Hold cap: above range PnL is frozen, so this gate can never clear on
+        // its own — force close once the position has been OOR longer than the cap.
+        const maxHoldMinutes = managementConfig.outOfRangeAboveMaxHoldMinutes ?? 120;
+        const oorSince = tracked?.out_of_range_since;
+        const minutesOOR = oorSince ? Math.floor((Date.now() - new Date(oorSince).getTime()) / 60000) : 0;
+        if (minutesOOR >= maxHoldMinutes) {
+          log("cron_warn", `Max-Hold: ${position.position} pumped above range, OOR ${minutesOOR}m >= ${maxHoldMinutes}m cap — closing despite PnL ${position.pnl_pct != null ? position.pnl_pct.toFixed(2) : "?"}% < ${minProfitGate}% gate (profile: ${profile})`);
+          return { action: "CLOSE", rule: 3, reason: `OOR above for ${minutesOOR}m (max hold: ${maxHoldMinutes}m)`, profile };
+        }
         log("cron_warn", `Pump-Hold: ${position.position} pumped above range but PnL ${position.pnl_pct != null ? position.pnl_pct.toFixed(2) : "?"}% < ${minProfitGate}% gate — holding (profile: ${profile})`);
         return null;
       }

@@ -321,6 +321,7 @@ export const CONFIG_MAP = {
   outOfRangeBinsToClose:      ["management", "outOfRangeBinsToClose"],
   outOfRangeWaitMinutes:      ["management", "outOfRangeWaitMinutes"],
   outOfRangeBelowWaitMinutes: ["management", "outOfRangeBelowWaitMinutes"],
+  outOfRangeAboveMaxHoldMinutes: ["management", "outOfRangeAboveMaxHoldMinutes"],
   oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
   oorCooldownHours: ["management", "oorCooldownHours"],
   lowYieldCooldownHours: ["management", "lowYieldCooldownHours"],

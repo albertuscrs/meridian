@@ -199,6 +199,7 @@ export const config = {
     outOfRangeBinsToClose:      u.outOfRangeBinsToClose      ?? 10,
     outOfRangeWaitMinutes:      u.outOfRangeWaitMinutes      ?? 35,
     outOfRangeBelowWaitMinutes: u.outOfRangeBelowWaitMinutes ?? 8,
+    outOfRangeAboveMaxHoldMinutes: u.outOfRangeAboveMaxHoldMinutes ?? 120, // hard cap (minutes) for OOR-above holds (Safety-Lock / Pump-Hold) — above range PnL is frozen, so force close at the cap
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     lowYieldCooldownHours:  u.lowYieldCooldownHours  ?? 4,

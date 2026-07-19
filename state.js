@@ -548,23 +548,39 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (active_bin != null && upper_bin != null && active_bin > upper_bin) {
       const oorLimit = trailingArmed ? 0 : (mgmtConfig.outOfRangeWaitMinutes ?? 35);
       if (minutesOOR >= oorLimit) {
-        if ((profile === "pecut" || profile === "experimental") && (currentPnlPct == null || currentPnlPct <= 0)) {
+        // Max-Hold cap: above range the position is pure SOL and PnL is frozen, so the
+        // Safety-Lock / R8 holds can never resolve on their own — force close at the cap.
+        const maxHoldMinutes = mgmtConfig.outOfRangeAboveMaxHoldMinutes ?? 120;
+        const maxHoldReached = minutesOOR >= maxHoldMinutes;
+        const safetyLockHold = (profile === "pecut" || profile === "experimental") && (currentPnlPct == null || currentPnlPct <= 0);
+        if (safetyLockHold && !maxHoldReached) {
           log("state", `Safety-Lock: ${position_address} OOR above for ${minutesOOR}m but PnL ${currentPnlPct != null ? currentPnlPct.toFixed(2) : "?"}% — holding (profile: ${profile})`);
           return null;
         }
         // R8: Indicator-Aware OOR Close (experimental only)
-        if (profile === "experimental" && indicatorData && !trailingArmed) {
+        let r8Hold = false;
+        if (!safetyLockHold && profile === "experimental" && indicatorData && !trailingArmed) {
           if (!indicatorData.confirmed) {
-            log("state", `R8 hold: ${position_address} OOR above for ${minutesOOR}m — indicators not confirmed: ${indicatorData.reason}`);
-            return null;
+            r8Hold = true;
+            if (!maxHoldReached) {
+              log("state", `R8 hold: ${position_address} OOR above for ${minutesOOR}m — indicators not confirmed: ${indicatorData.reason}`);
+              return null;
+            }
+          } else {
+            log("state", `R8 confirmed: ${position_address} OOR above — ${indicatorData.reason}`);
           }
-          log("state", `R8 confirmed: ${position_address} OOR above — ${indicatorData.reason}`);
+        }
+        const cappedOut = maxHoldReached && (safetyLockHold || r8Hold);
+        if (cappedOut) {
+          log("state", `Max-Hold: ${position_address} OOR above for ${minutesOOR}m >= ${maxHoldMinutes}m cap — closing despite PnL ${currentPnlPct != null ? currentPnlPct.toFixed(2) : "?"}% (profile: ${profile})`);
         }
         return {
           action: "OUT_OF_RANGE",
           reason: trailingArmed
             ? "Trailing TP: OOR above (trailing armed)"
-            : `OOR above for ${minutesOOR}m (limit: ${oorLimit}m)`,
+            : cappedOut
+              ? `OOR above for ${minutesOOR}m (max hold: ${maxHoldMinutes}m)`
+              : `OOR above for ${minutesOOR}m (limit: ${oorLimit}m)`,
           profile,
         };
       }
