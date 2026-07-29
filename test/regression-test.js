@@ -108,7 +108,11 @@ function checkExitsLogic(pos, positionData, mgmtConfig, indicatorData = null) {
   if (!pnl_pct_suspicious && pos.trailing_active) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
-      return { action: "TRAILING_TP_QUEUED" };
+      return {
+        action: "TRAILING_TP_QUEUED",
+        reason: `Trailing TP: dropped ${dropFromPeak.toFixed(2)}pt from peak ${pos.peak_pnl_pct.toFixed(2)}% (limit: ${mgmtConfig.trailingDropPct}pt)`,
+        profile,
+      };
     }
   }
 
@@ -238,6 +242,23 @@ console.log("\n── R2/R4.1: Trailing TP confirmation queue ──");
   const pos = makePos({ trailing_active: false, peak_pnl_pct: 4.0 });
   const result = checkExitsLogic(pos, makePositionData({ pnl_pct: 3.4 }), makeConfig());
   assertNull(result, "R4.1: trailing not active → no TP queue");
+}
+
+{
+  // The queued trailing exit MUST carry a reason. Without it the poller close path
+  // (index.js) falls back to `Rule ${rule}` → "Rule exit", which matches no
+  // pool-cooldown classifier, so the exit silently sets no cooldown.
+  const pos = makePos({ trailing_active: true, peak_pnl_pct: 4.0 });
+  const result = checkExitsLogic(pos, makePositionData({ pnl_pct: 3.4 }), makeConfig());
+  assert(!!result?.reason, "R4.1: TRAILING_TP_QUEUED carries a close reason (no 'Rule exit' fallback)");
+  assert(result.reason.toLowerCase().includes("trailing tp"),
+    "R4.1: reason contains 'trailing tp' so isTrailingTpCloseReason() classifies it");
+  const low = result.reason.toLowerCase();
+  assert(!low.includes("take profit") && !low.includes("oor") && !low.includes("out of range") &&
+         !low.includes("low yield") && !low.includes("stop loss"),
+    "R4.1: reason does not collide with other cooldown classifiers");
+  assert(result.reason.includes("0.60pt") && result.reason.includes("4.00%"),
+    "R4.1: reason reports actual drop and peak");
 }
 
 {
@@ -1098,6 +1119,19 @@ console.log("\n── GMGN Settings: CONFIG_MAP + UI structure ──");
   const menuSrc = fs.readFileSync(new URL("../settings-menu.js", import.meta.url), "utf8");
   assert(menuSrc.includes("max-hold ${config.management.outOfRangeAboveMaxHoldMinutes}m"),
     "Settings: max-hold shown in the OOR snapshot line");
+
+  // Test 12: TRAILING_TP_QUEUED carries a reason end-to-end (no "Rule exit" label)
+  const stateSrc2 = fs.readFileSync(new URL("../state.js", import.meta.url), "utf8");
+  const queuedBlock = stateSrc2.slice(stateSrc2.indexOf('action: "TRAILING_TP_QUEUED"') - 400,
+                                      stateSrc2.indexOf('action: "TRAILING_TP_QUEUED"') + 300);
+  assert(/reason: `Trailing TP: dropped/.test(queuedBlock),
+    "State: TRAILING_TP_QUEUED return populates a Trailing TP reason");
+  const cdSrc = fs.readFileSync(new URL("../pool-cooldown.js", import.meta.url), "utf8");
+  assert(cdSrc.includes('text.includes("trailing tp")'),
+    "Cooldown: isTrailingTpCloseReason matches on 'trailing tp' (contract for the reason string)");
+  // The old bug: index.js falls back to `Rule ${rule}` when reason is missing.
+  assert(idxSrc.includes("`Rule ${act.rule}`"),
+    "Index: close-reason fallback still exists (fix is upstream — reason must be supplied)");
 }
 
 

@@ -533,7 +533,16 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
       queueTrailingDropConfirmation(position_address, pos.peak_pnl_pct, currentPnlPct, mgmtConfig.trailingDropPct);
-      return { action: "TRAILING_TP_QUEUED" };
+      // The reason MUST be populated: the poller close path (index.js) falls back to
+      // `Rule ${rule}` when it is missing, which produced the meaningless "Rule exit"
+      // label — that string matches no pool-cooldown classifier, so the most frequent
+      // profitable exit silently set no cooldown at all. Keep "Trailing TP" in the text:
+      // isTrailingTpCloseReason() (pool-cooldown.js) matches on it.
+      return {
+        action: "TRAILING_TP_QUEUED",
+        reason: `Trailing TP: dropped ${dropFromPeak.toFixed(2)}pt from peak ${pos.peak_pnl_pct.toFixed(2)}% (limit: ${mgmtConfig.trailingDropPct}pt)`,
+        profile,
+      };
     }
   }
 
