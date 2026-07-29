@@ -1,14 +1,19 @@
 # Trailing Tiers — Plan Implementasi (Tiered Trailing Take-Profit)
 
-> **Status: PLAN / DRAFT — belum diimplementasi.** Adaptasi dari draft Hermes
-> (`~/.hermes/plans/trailing-tiers-development.md`, 2026-07-07) dengan koreksi desain
-> dan analisis data peak PnL. Semua referensi `file.js:line` diverifikasi 2026-07-07.
-> Setiap stage butuh go eksplisit dari operator.
+> **Status: SELESAI — Stage A DIPERTAHANKAN permanen, Stage B NO-GO (2026-07-29).**
+> Keputusan operator setelah review data 21.8 hari (lihat "Review Stage A" di bawah).
+> Stage A (`trailingTriggerPct=2.5`, `trailingDropPct=1.5`) jadi konfigurasi tetap,
+> bukan eksperimen lagi. Stage B (`trailingTiers`) ditutup — jangan dibuka ulang
+> tanpa data baru yang membantah alasan no-go.
+> Adaptasi dari draft Hermes (`~/.hermes/plans/trailing-tiers-development.md`,
+> 2026-07-07). Referensi `file.js:line` diverifikasi 2026-07-07; angka review
+> diverifikasi 2026-07-29.
 
 ## Ide & Tujuan
 
-Trailing TP yang sekarang flat (`trailingTriggerPct=3`, `trailingDropPct=1.1` di
-user-config live). Tujuan operator (klarifikasi 2026-07-07): **opportunity capture** —
+Trailing TP flat. Nilai saat dokumen ini ditulis: `trailingTriggerPct=3`,
+`trailingDropPct=1.1`; **live sekarang 2.5 / 1.5** (Stage A, permanen sejak
+2026-07-29). Tujuan operator (klarifikasi 2026-07-07): **opportunity capture** —
 selama pool masih eligible (in-range, fee masih ngalir), jangan biarkan wiggle kecil
 menendang posisi keluar; kasih napas melebar seiring profit naik supaya fee terus
 terakumulasi. Ini BUKAN fitur proteksi profit — proteksi sudah dipegang Rule 0/R1.
@@ -147,12 +152,16 @@ PnL per posisi resolusi ~3 detik. Window tersedia: 7 hari (2026-07-01 → 07-07)
 
 ---
 
-## Stage A — Quick win flat (config-only, NOL kode) — ✅ APPLIED 2026-07-07
+## Stage A — Quick win flat (config-only, NOL kode) — ✅ PERMANEN sejak 2026-07-29
 
-**Status: AKTIF sejak 2026-07-07 08:02 UTC** — operator apply via /settings
+**Status: DIPERTAHANKAN permanen** (keputusan operator 2026-07-29 setelah review).
+Bukan eksperimen lagi — `trailingTriggerPct=2.5`, `trailingDropPct=1.5` adalah
+konfigurasi tetap. Hasil dan alasannya di bagian "Review Stage A" di bawah.
+
+**Riwayat: AKTIF sejak 2026-07-07 08:02 UTC** — operator apply via /settings
 (`trailingTriggerPct 2.5`, `trailingDropPct 1.5`; verified live setelah restart
-18:23 UTC). Review ~2026-07-21. Detail eksperimen di memory
-`trailing-stage-a-experiment`.
+18:23 UTC). Review dijalankan 2026-07-29 (telat 8 hari — window jadi lebih tebal);
+hasilnya di bagian "Review Stage A" di atas.
 
 Ini perubahan parameter uang — butuh nilai eksplisit dari operator. Flat tidak bisa
 melebar per level (itu kerjaan Stage B), tapi ada dua tweak murah selagi Stage B
@@ -167,9 +176,95 @@ dibangun:
 - Perlakukan sebagai eksperimen ala operator: catat tanggal + review date (~2 minggu),
   bandingkan realized exit + fee capture vs baseline (tabel Phase 0/0.5 di atas;
   rerun analisis wiggle dengan log segar — metodologi di bagian bawah dokumen ini).
-- **Go/no-go Stage B ditentukan setelah data Stage A masuk.**
+- **Go/no-go Stage B ditentukan setelah data Stage A masuk.** → dijawab 2026-07-29: NO-GO.
 
-## Stage B — Implementasi `trailingTiers` (kode) — GATE: go terpisah
+---
+
+## Review Stage A (2026-07-29) — dasar keputusan
+
+Window: Stage A live 2026-07-07 18:23 UTC → 2026-07-29 14:00 UTC (21.8 hari, n=109
+close) vs baseline 21.8 hari sebelumnya (n=112). Sumber: `lessons.json` performance
+di-join dengan `peak_pnl_pct` dari `state-archive.jsonl` + `state.json` (coverage
+109/109 dan 112/112), plus rerun wiggle dari 12 hari log (18–29 Jul).
+
+### Hasil cohort armed (yang benar-benar diatur policy ini)
+
+| | POST Stage A (2.5/1.5) | PRE (3/1.1) |
+|---|---|---|
+| Posisi armed | **38** (peak≥2.5%) | 22 (peak≥3%) |
+| Exit lewat jalur trailing | 36/38 (95%) | 22/22 (100%) |
+| **Net SOL cohort armed** | **0.6117** | 0.4064 |
+| avg exit per posisi | 2.61% | 3.23% |
+
+Trade-off sesuai hipotesis: arming lebih awal menangkap **73% lebih banyak posisi**
+dengan kualitas rata-rata lebih rendah → **+50% SOL absolut**. Distribusi peak juga
+naik (p75 2.74% vs 1.33%, max 8.22% vs 6.28%).
+
+Komposisi exit bergeser: POST 71% keluar lewat gate drop (avg exit 2.28%, give-back
+median 1.25pt), 24% lewat OOR-armed (avg exit 3.62%, give-back **−0.06pt** — karena
+`oorLimit=0` saat armed = close instan). Di PRE kebalikannya (73% OOR-armed).
+
+### Rerun wiggle — justifikasi drop 1.5 TIDAK tereproduksi
+
+12 hari log, 59 posisi, 247 episode drawdown (231 recovered / 16 terminal).
+Survival wiggle-recoverable zona 2-4%:
+
+| dropPct | Plan asli (1–7 Jul) | Fresh (18–29 Jul) |
+|---|---|---|
+| 1.1 | 77% | **84%** |
+| 1.5 (live) | 84% | **84%** |
+| 1.8 | 94% | **84%** |
+| 2.2 | 97% | **84%** |
+
+Datar total dari 1.1 ke atas — sisa 16% adalah 4 episode dengan depth ≥2.2pt yang
+menembus lebar drop mana pun. **Kesimpulan: yang menghasilkan di Stage A adalah
+trigger 3→2.5, bukan drop 1.1→1.5.** Drop 1.5 dipertahankan karena terbukti tidak
+merugikan dan mengubahnya lagi hanya menambah churn tanpa hipotesis baru.
+
+### Confound & caveat (jangan dihilangkan saat mengutip angka di atas)
+
+- Window POST terpotong dua kejadian. Segmentasi net SOL: A1 (7–13 Jul) **−0.1314**,
+  A2 outage Helius (13–19 Jul) +0.0767, A3 pasca-outage (19–29 Jul) **+0.3176**.
+  Angka portfolio keseluruhan (avg exit POST 0.354% vs PRE 0.435%) ditarik turun A1 —
+  bukan bukti Stage A merugikan. Konversi armed→trailing per segmen: 100% / 85% / 100%.
+- Data wiggle **tersensor policy sendiri**: di bawah drop 1.5, episode armed yang lebih
+  dalam dari 1.5 keburu ditutup, jadi tidak terlihat apakah akan recover. Angka 84%
+  yang datar sebagian bisa artefak. Mitigasi parsial: episode dalam masih terlihat dari
+  posisi belum-armed (max recovered depth 4.27pt di bucket 2-4%). Limitasi metodologi
+  yang sama dengan yang di-flag Phase 0.
+- n kecil: 38 armed POST vs 22 PRE. Selisih satu-dua posisi tidak signifikan.
+- Log retensi 12 hari vs lessons 21.8 hari penuh.
+
+### Temuan sampingan (bug, sudah diperbaiki)
+
+Review ini menemukan bahwa close reason `"Rule exit"` — bucket terbesar di semua tabel
+close-reason — sebenarnya adalah **trailing-drop close yang kehilangan label**:
+`state.js` Rule 2 me-return `{ action: "TRAILING_TP_QUEUED" }` tanpa `reason`, lalu
+poller close path di `index.js` fallback ke `` `Rule ${act.rule}` `` (rule="exit").
+Akibatnya string itu tidak match classifier mana pun di `pool-cooldown.js` → exit
+paling sering dan paling profitable **tidak menyetel cooldown sama sekali**.
+Diperbaiki 2026-07-29 (reason diisi di sumbernya). Analisis close-reason sebelum
+tanggal itu harus membaca `"Rule exit"` sebagai trailing-drop close.
+
+## Stage B — Implementasi `trailingTiers` (kode) — ❌ NO-GO (2026-07-29)
+
+**Ditutup. Jangan implementasi tanpa data baru yang membantah keempat alasan ini:**
+
+1. **Tidak ada ekor untuk dibuatkan tangga.** Peak fresh: p95 6.21%, max 8.22%. Tier
+   atas rencana (4/1.8, 6/2.2) hampir tidak pernah kepakai. Di data fresh bucket 4-6%
+   = 9 episode recovered dengan depth maksimal **0.58pt** — survival 100% di semua
+   lebar drop yang diuji. Melebarkan drop di peak tinggi menyelesaikan masalah yang
+   tidak ada.
+2. **Phase 0 di dokumen ini sendiri** sudah menemukan tiering ≈ flat yang di-retune
+   (0.23 vs 0.24).
+3. **Lever-nya tumpul**: survival datar 84% dari drop 1.1 sampai 2.2 (rerun 2026-07-29).
+4. **Biaya vs manfaat jelek**: resolver baru + 3 titik integrasi di jalur uang live.
+
+Desain di bawah dipertahankan sebagai arsip — kalau suatu saat distribusi peak berubah
+punya ekor nyata (mis. p95 > 10%), mulai lagi dari mengulang Phase 0.5, bukan dari
+mengimplementasi spek ini apa adanya.
+
+### (arsip) Spek desain Stage B
 
 Bentuk config (maks 3 tier), arah **melebar ke atas** (opportunity capture — dari
 data Phase 0.5):
