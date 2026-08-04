@@ -432,7 +432,9 @@ export async function runManagementCycle({ silent = false } = {}) {
       const act = actionMap.get(p.position);
       const cur = config.management.solMode ? "◎" : "$";
       const pnlSign = (p.pnl_pct ?? 0) >= 0 ? "+" : "";
-      const pnlPctStr = `${pnlSign}${(p.pnl_pct ?? 0).toFixed(1)}%`;
+      // 2 decimals: matches the avg-PnL footer, the PnL poller diag log, and the
+      // close-reason strings — a 1-decimal display disagreed with its own logs.
+      const pnlPctStr = `${pnlSign}${(p.pnl_pct ?? 0).toFixed(2)}%`;
       const pnlUsdStr = (p.pnl_usd ?? 0) >= 0 ? `+${cur}${(p.pnl_usd ?? 0).toFixed(3)}` : `-${cur}${(Math.abs(p.pnl_usd) ?? 0).toFixed(3)}`;
       const range = fmtRangeBar(p.active_bin, p.lower_bin, p.upper_bin);
       const rangeEmoji = range.oor ? "🔴" : "🟢";

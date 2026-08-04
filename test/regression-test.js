@@ -1853,6 +1853,23 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(!settingsSrc.includes('settingButton("Entry: ST"'), "settings ✓: old unmarked Entry buttons removed");
 }
 
+// ─── PnL % display precision ────────────────────────────────────────────────────
+
+{
+  const fs = await import("fs");
+  const indexSrc = fs.readFileSync("index.js", "utf8");
+
+  // The management report's per-position PnL used 1 decimal while the avg-PnL
+  // footer, the poller diag log and close reasons all used 2 — the same number
+  // rendered two ways. Keep every PnL % on 2 decimals.
+  const twoDecimalHits = (indexSrc.match(/\(p\.pnl_pct \?\? 0\)\.toFixed\(2\)/g) || []).length;
+  assert(twoDecimalHits >= 1, "pnl precision: management report renders PnL % with 2 decimals");
+  // /positions (index.js) still renders 1 decimal — deliberately out of scope for
+  // now. If that gets aligned too, this count goes to 0 and the assert below flips.
+  const oneDecimalHits = (indexSrc.match(/\(p\.pnl_pct \?\? 0\)\.toFixed\(1\)/g) || []).length;
+  assert(oneDecimalHits <= 1, "pnl precision: at most the /positions block still uses 1 decimal");
+}
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log("\n─────────────────────────────────");
