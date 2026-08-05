@@ -1870,6 +1870,73 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(oneDecimalHits <= 1, "pnl precision: at most the /positions block still uses 1 decimal");
 }
 
+// ─── GMGN request pacing — serialised, no bursts ────────────────────────────────
+// 2026-08-05 incident: GMGN IP-banned the box for "repeated rate limit
+// violations". Pacing read a shared timestamp without holding a slot, so
+// concurrent callers slept the same amount and fired together.
+
+{
+  const fs = await import("fs");
+
+  // Functional: mirror of both pacing implementations, delay shrunk for speed.
+  const DELAY = 40;
+
+  const runOld = async () => {
+    // Prime `last` the way production does: a request just went out, so both
+    // concurrent callers land on the sleep path with the same stale timestamp.
+    let last = Date.now();
+    const fires = [];
+    const pace = async () => {
+      const elapsed = Date.now() - last;
+      if (elapsed < DELAY) await new Promise((r) => setTimeout(r, DELAY - elapsed));
+      last = Date.now();
+    };
+    const t0 = Date.now();
+    await Promise.all([pace().then(() => fires.push(Date.now() - t0)),
+                       pace().then(() => fires.push(Date.now() - t0))]);
+    return fires;
+  };
+
+  const runNew = async () => {
+    let last = Date.now();
+    let queue = Promise.resolve();
+    const fires = [];
+    const pace = () => {
+      const turn = queue.then(async () => {
+        const elapsed = Date.now() - last;
+        if (elapsed < DELAY) await new Promise((r) => setTimeout(r, DELAY - elapsed));
+        last = Date.now();
+      });
+      queue = turn.catch(() => {});
+      return turn;
+    };
+    const t0 = Date.now();
+    await Promise.all([pace().then(() => fires.push(Date.now() - t0)),
+                       pace().then(() => fires.push(Date.now() - t0))]);
+    return fires;
+  };
+
+  const oldFires = await runOld();
+  const newFires = await runNew();
+  const gap = (f) => Math.abs(f[1] - f[0]);
+
+  assert(gap(oldFires) < DELAY / 2,
+    `pacing: old logic fired both requests together (gap ${gap(oldFires)}ms) — the bug`);
+  assert(gap(newFires) >= DELAY * 0.8,
+    `pacing: serialised pacing spaces concurrent callers (gap ${gap(newFires)}ms >= ${DELAY * 0.8}ms)`);
+
+  // Source: the real file must use the queue, and Stage 3 must not batch the two
+  // most expensive GMGN endpoints into one Promise.all again.
+  const gmgnSrc = fs.readFileSync(new URL("../tools/gmgn.js", import.meta.url), "utf8");
+  assert(gmgnSrc.includes("gmgnPaceQueue"), "pacing: gmgn.js pacing goes through a serialised queue");
+  assert(/queue = turn\.catch|gmgnPaceQueue = turn\.catch/.test(gmgnSrc),
+    "pacing: a rejected waiter cannot break the pace chain");
+  const stage3 = gmgnSrc.slice(gmgnSrc.indexOf("Stage 3:"), gmgnSrc.indexOf("Stage3 pool:"));
+  assert(!stage3.includes("Promise.all"), "pacing: Stage 3 no longer fires GMGN calls in parallel");
+  assert(stage3.includes("token_top_holders") && stage3.includes("token_top_traders"),
+    "pacing: Stage 3 still fetches both holders and traders");
+}
+
 // ─── Results ──────────────────────────────────────────────────────────────────
 
 console.log("\n─────────────────────────────────");

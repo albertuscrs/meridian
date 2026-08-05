@@ -10,17 +10,29 @@ setDefaultResultOrder("ipv4first");
 const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
 let lastGmgnRequestAt = 0;
+let gmgnPaceQueue = Promise.resolve();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function paceGmgnRequest() {
+// Serialised pacing. The previous version read `lastGmgnRequestAt` and slept
+// without holding a slot, so concurrent callers (Stage 3 fired two fetches at
+// once) computed the same delay, woke together and hit GMGN simultaneously —
+// the 2.5s spacing degraded into bursts and earned an IP rate-limit ban on
+// 2026-08-05. Each caller now queues behind the previous one, so N concurrent
+// requests are spaced delayMs apart instead of all firing at the same instant.
+function paceGmgnRequest() {
   const delayMs = Math.max(0, Number(config.gmgn?.requestDelayMs ?? 2500));
-  if (!delayMs) return;
-  const elapsed = Date.now() - lastGmgnRequestAt;
-  if (elapsed < delayMs) await sleep(delayMs - elapsed);
-  lastGmgnRequestAt = Date.now();
+  if (!delayMs) return Promise.resolve();
+  const turn = gmgnPaceQueue.then(async () => {
+    const elapsed = Date.now() - lastGmgnRequestAt;
+    if (elapsed < delayMs) await sleep(delayMs - elapsed);
+    lastGmgnRequestAt = Date.now();
+  });
+  // Keep the chain alive even if a waiter is rejected/abandoned upstream.
+  gmgnPaceQueue = turn.catch(() => {});
+  return turn;
 }
 
 function getApiKey() {
@@ -596,14 +608,17 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
   for (const { token, info, infoCheck } of s2) {
     const mint = token.address;
     try {
-      const [holdersPayload, tradersPayload] = await Promise.all([
-        gmgnFetch("/v1/market/token_top_holders", {
-          params: { chain: "sol", address: mint, limit: g.holdersLimit || 100, order_by: "amount_percentage", direction: "desc" },
-        }),
-        gmgnFetch("/v1/market/token_top_traders", {
-          params: { chain: "sol", address: mint, limit: g.holdersLimit || 100, order_by: "profit", direction: "desc" },
-        }),
-      ]);
+      // Awaited one after the other, deliberately. These are the two most
+      // expensive GMGN endpoints and firing them concurrently is what produced
+      // the request bursts behind the 2026-08-05 rate-limit ban. Pacing
+      // serialises them anyway now, so concurrency bought no wall-clock time —
+      // only a burst. (A regression test asserts this block stays sequential.)
+      const holdersPayload = await gmgnFetch("/v1/market/token_top_holders", {
+        params: { chain: "sol", address: mint, limit: g.holdersLimit || 100, order_by: "amount_percentage", direction: "desc" },
+      });
+      const tradersPayload = await gmgnFetch("/v1/market/token_top_traders", {
+        params: { chain: "sol", address: mint, limit: g.holdersLimit || 100, order_by: "profit", direction: "desc" },
+      });
       const holders = unwrapList(holdersPayload, ["list", "holders", "data"]);
       const traders = unwrapList(tradersPayload, ["list", "traders", "data"]);
       const holdersCheck = analyzeHoldersAndTraders(holders, traders);
