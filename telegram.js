@@ -245,6 +245,11 @@ function isRetryableStatus(status) {
   return RETRYABLE_5XX_STATUS.has(status);
 }
 
+// Without a timeout a stalled connect can park a notification for minutes and
+// the retry below never gets its turn. 15s is well above the p99 for a healthy
+// call (~0.5s observed) and well below the 3s PnL poll / 3m management cycle.
+const TELEGRAM_REQUEST_TIMEOUT_MS = 15_000;
+
 async function postTelegramStatus(method, body, { requireChatId = true } = {}) {
   if (!TOKEN) return { ok: false, status: null, data: null };
   if (requireChatId && !chatId) return { ok: false, status: null, data: null };
@@ -253,6 +258,7 @@ async function postTelegramStatus(method, body, { requireChatId = true } = {}) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requireChatId ? { chat_id: chatId, ...body } : body),
+      signal: AbortSignal.timeout(TELEGRAM_REQUEST_TIMEOUT_MS),
     });
     if (!res.ok) {
       const err = await res.text().catch(() => "");
@@ -271,23 +277,46 @@ async function postTelegramStatus(method, body, { requireChatId = true } = {}) {
   }
 }
 
+// A network-level failure surfaces as status === null (fetch threw: DNS, connect
+// reset, timeout — no HTTP response at all). The previous guard required
+// `status != null`, so exactly those attempts were never retried: on 2026-08-13
+// a ~28min blip to api.telegram.org dropped 22 sendMessage calls on the first
+// try, silently. Retrying with no response is the whole point — a 4xx we should
+// NOT retry (bad HTML, 401), and those keep a non-null status.
+function isRetryableFailure(result) {
+  if (result.status == null) return true;
+  return isRetryableStatus(result.status);
+}
+
+// Escalating backoff: covers a short blip without hammering a struggling API.
+const RETRY_BACKOFF_MS = [750, 2000, 5000];
 const RETRY_METHODS = new Set(["sendMessage"]);
-async function postTelegramWithRetry(method, body, { maxAttempts = 2, retryDelayMs = 750 } = {}) {
+async function postTelegramWithRetry(method, body, { maxAttempts = 3, backoffMs = RETRY_BACKOFF_MS } = {}) {
   if (!RETRY_METHODS.has(method)) {
     return postTelegramStatus(method, body);
   }
+  // No token/chat is a config state, not a transient failure — retrying it would
+  // burn ~8s of backoff per message on every send (tests, DRY_RUN, unconfigured).
+  if (!TOKEN || !chatId) return postTelegramStatus(method, body);
   let attempt = 0;
   let lastResult = null;
   while (attempt < maxAttempts) {
     attempt += 1;
     lastResult = await postTelegramStatus(method, body);
-    if (lastResult.ok) return lastResult;
-    if (attempt < maxAttempts && lastResult.status != null && isRetryableStatus(lastResult.status)) {
-      await new Promise((r) => setTimeout(r, retryDelayMs));
+    if (lastResult.ok) {
+      if (attempt > 1) log("telegram", `${method} succeeded on attempt ${attempt}/${maxAttempts}`);
+      return lastResult;
+    }
+    if (attempt < maxAttempts && isRetryableFailure(lastResult)) {
+      const delay = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)];
+      await new Promise((r) => setTimeout(r, delay));
       continue;
     }
-    return lastResult;
+    break;
   }
+  // Loud on total loss: a dropped deploy/close notification otherwise leaves no
+  // trace beyond a generic "failed" line that looks like a single flaky attempt.
+  log("telegram_error", `${method} gave up after ${attempt} attempt(s) — message NOT delivered`);
   return lastResult;
 }
 

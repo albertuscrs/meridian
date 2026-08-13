@@ -1590,6 +1590,98 @@ function trySendChatActionLogic(state, now, fetchResult) {
 }
 
 
+// ─── Telegram sendMessage retry on network failure (2026-08-13 blip) ───────────
+// A fetch that throws (DNS/connect/timeout) returns status === null. The old
+// guard required `status != null` to retry, so those attempts — the ones that
+// most need a second try — were dropped after one shot. 22 notifications were
+// lost that way during a 28min outage to api.telegram.org.
+
+console.log("\n── Telegram: sendMessage retry on network failure ──");
+
+{
+  // Mirror of postTelegramWithRetry's attempt loop. `results` is the sequence of
+  // outcomes the transport would produce; returns what the caller observes.
+  function runRetry(results, { maxAttempts = 3, retryable }) {
+    const backoff = [750, 2000, 5000];
+    const delays = [];
+    let attempt = 0;
+    let last = null;
+    while (attempt < maxAttempts) {
+      last = results[Math.min(attempt, results.length - 1)];
+      attempt += 1;
+      if (last.ok) return { attempts: attempt, delivered: true, delays };
+      if (attempt < maxAttempts && retryable(last)) {
+        delays.push(backoff[Math.min(attempt - 1, backoff.length - 1)]);
+        continue;
+      }
+      break;
+    }
+    return { attempts: attempt, delivered: false, delays };
+  }
+
+  const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+  // The buggy predicate, kept so the regression is reproduced, not just asserted.
+  const oldRetryable = (r) => r.status != null && RETRYABLE_STATUS.has(r.status);
+  const newRetryable = (r) => (r.status == null ? true : RETRYABLE_STATUS.has(r.status));
+
+  const netFail = { ok: false, status: null };
+  const ok = { ok: true, status: 200 };
+
+  // The actual incident shape: network dies, then recovers.
+  const oldNet = runRetry([netFail, ok], { retryable: oldRetryable });
+  assertEquals(oldNet.attempts, 1, "Telegram retry: old predicate gave up after 1 attempt on network failure");
+  assertEquals(oldNet.delivered, false, "Telegram retry: old predicate lost the message (reproduces the bug)");
+
+  const newNet = runRetry([netFail, ok], { retryable: newRetryable });
+  assertEquals(newNet.attempts, 2, "Telegram retry: network failure is retried");
+  assertEquals(newNet.delivered, true, "Telegram retry: message delivered on the second attempt");
+  assertEquals(newNet.delays[0], 750, "Telegram retry: first backoff is 750ms");
+
+  // Sustained outage: bounded attempts, then a definitive give-up.
+  const dead = runRetry([netFail], { retryable: newRetryable });
+  assertEquals(dead.attempts, 3, "Telegram retry: sustained outage stops at maxAttempts");
+  assertEquals(dead.delivered, false, "Telegram retry: sustained outage reports non-delivery");
+  assertEquals(dead.delays.join(","), "750,2000", "Telegram retry: backoff escalates 750ms then 2000ms");
+
+  // 429 still retried (unchanged behaviour).
+  const rate = runRetry([{ ok: false, status: 429 }, ok], { retryable: newRetryable });
+  assertEquals(rate.delivered, true, "Telegram retry: 429 still retried and delivered");
+
+  // Client errors must NOT be retried — a 400 (bad HTML) or 401 (bad token)
+  // fails identically every time; retrying only delays the error.
+  for (const status of [400, 401, 403]) {
+    const res = runRetry([{ ok: false, status }, ok], { retryable: newRetryable });
+    assertEquals(res.attempts, 1, `Telegram retry: ${status} is not retried`);
+  }
+}
+
+{
+  const fs = await import("fs");
+  const tgSrc = fs.readFileSync("telegram.js", "utf8");
+
+  assert(tgSrc.includes("function isRetryableFailure"), "Telegram retry: isRetryableFailure helper exists");
+  assert(/isRetryableFailure\(result\)\s*\{[\s\S]{0,160}result\.status == null\) return true/.test(tgSrc),
+    "Telegram retry: null status (no HTTP response) counts as retryable");
+  assert(!/lastResult\.status != null && isRetryableStatus/.test(tgSrc),
+    "Telegram retry: the status != null guard that dropped network failures is gone");
+  assert(tgSrc.includes("RETRY_BACKOFF_MS = [750, 2000, 5000]"), "Telegram retry: escalating backoff table defined");
+  assert(/maxAttempts = 3/.test(tgSrc), "Telegram retry: maxAttempts raised to 3");
+  assert(tgSrc.includes("message NOT delivered"), "Telegram retry: total loss is logged loudly");
+  assert(/if \(!TOKEN \|\| !chatId\) return postTelegramStatus/.test(tgSrc),
+    "Telegram retry: unconfigured token/chat skips the backoff loop");
+
+  // A request with no timeout can park a notification indefinitely, which makes
+  // the retry loop unreachable in exactly the case it exists for.
+  assert(tgSrc.includes("TELEGRAM_REQUEST_TIMEOUT_MS = 15_000"), "Telegram retry: request timeout constant defined");
+  const postMatch = tgSrc.match(/async function postTelegramStatus[\s\S]*?\n\}/);
+  assertNotNull(postMatch, "Telegram retry: postTelegramStatus found in source");
+  if (postMatch) {
+    assert(postMatch[0].includes("AbortSignal.timeout(TELEGRAM_REQUEST_TIMEOUT_MS)"),
+      "Telegram retry: postTelegramStatus fetch is bounded by the timeout");
+  }
+}
+
+
 // ─── JSON Store (atomic write + corrupt-file protection) ───────────────────────
 
 {
