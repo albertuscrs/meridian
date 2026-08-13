@@ -37,7 +37,7 @@ export function formatConfigSnapshot() {
     `OOR: above=${config.management.outOfRangeWaitMinutes}m / below=${config.management.outOfRangeBelowWaitMinutes}m | max-hold ${config.management.outOfRangeAboveMaxHoldMinutes}m | fast-close >${config.management.outOfRangeBinsToClose} bins | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h | pump gate ${config.management.minProfitPctToCloseOOR}%`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m | close profile: ${config.management.closeProfile}`,
-    `Profit-exit cooldown: trail-TP ${config.management.trailingTpCooldownHours}h | TP ${config.management.takeProfitCooldownHours}h`,
+    `Profit-exit cooldown: trail-TP ${config.management.trailingTpCooldownHours}h | TP ${config.management.takeProfitCooldownHours}h | manual ${config.management.manualCloseCooldownHours}h | default ${config.management.defaultCooldownHours}h`,
     `R8: ${config.management.r8IndicatorCheck ? "on" : "off"} | preset ${config.management.r8ExitPreset} | cooldown ${config.management.r8OorCooldownHours}h`,
     `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl} | vol ${config.screening.minVolatility ?? 0}-${config.screening.maxVolatility ?? "∞"} | fee/tvl ${config.screening.minFeeActiveTvlRatio}-${config.screening.maxFeeActiveTvlRatio ?? "∞"}%`,
     `GMGN interval: ${config.gmgn.interval} | OrderBy: ${config.gmgn.orderBy} | Dir: ${config.gmgn.direction}`,
@@ -140,6 +140,8 @@ export function settingValue(key) {
     r8OorCooldownHours: config.management.r8OorCooldownHours,
     trailingTpCooldownHours: config.management.trailingTpCooldownHours,
     takeProfitCooldownHours: config.management.takeProfitCooldownHours,
+    manualCloseCooldownHours: config.management.manualCloseCooldownHours,
+    defaultCooldownHours: config.management.defaultCooldownHours,
   };
   return values[key];
 }
@@ -256,6 +258,8 @@ export function renderSettingsMenu(page = "main") {
       inputButton("r8OorCooldownHours", "R8 cooldown hrs"),
       inputButton("trailingTpCooldownHours", "Trail-TP cooldown hrs", { digits: 1 }),
       inputButton("takeProfitCooldownHours", "TP cooldown hrs", { digits: 1 }),
+      inputButton("manualCloseCooldownHours", "Manual cooldown hrs", { digits: 1 }),
+      inputButton("defaultCooldownHours", "Default cooldown hrs", { digits: 1 }),
     ];
   } else if (page === "screen") {
     rows = [

@@ -207,6 +207,8 @@ export const config = {
     lossGt1PctCooldownHours: u.lossGt1PctCooldownHours ?? 1,
     trailingTpCooldownHours: u.trailingTpCooldownHours ?? 2,  // cooldown after a trailing-TP exit (profitable) — pause, not punishment
     takeProfitCooldownHours: u.takeProfitCooldownHours ?? 1,  // cooldown after a take-profit / pumped-above-range exit
+    manualCloseCooldownHours: u.manualCloseCooldownHours ?? 1, // cooldown after an operator /close
+    defaultCooldownHours:    u.defaultCooldownHours    ?? 4,  // catch-all when no close-reason classifier matches
     oorBigLossCooldownHours: u.oorBigLossCooldownHours ?? 6,
     oorBigLossPnlThreshold: u.oorBigLossPnlThreshold ?? -2,
     cumulativeLossCooldownHours: u.cumulativeLossCooldownHours ?? 48,

@@ -1870,43 +1870,43 @@ function trySendChatActionLogic(state, now, fetchResult) {
   assert(oneDecimalHits <= 1, "pnl precision: at most the /positions block still uses 1 decimal");
 }
 
-// ─── Profit-exit cooldown keys (trailingTp / takeProfit) ────────────────────────
-// Both were hardcoded `?? 2` / `?? 1` fallbacks in pool-cooldown.js — real values
-// with no way to change them. Wired as config keys 2026-08-13.
+// ─── Cooldown-hour config keys ──────────────────────────────────────────────────
+// All four were hardcoded `??` fallbacks in pool-cooldown.js — real values that
+// govern re-entry timing, with no way to see or change them. Wired 2026-08-13.
 
 {
   // NOTE: settings-menu.js is source-checked, never imported — it starts timers at
-  // module scope, which keeps the suite's event loop alive forever.
+  // module scope, which would keep the suite's event loop alive forever.
   const fs = await import("fs");
 
+  const COOLDOWN_KEYS = {
+    trailingTpCooldownHours: 2,
+    takeProfitCooldownHours: 1,
+    manualCloseCooldownHours: 1,
+    defaultCooldownHours: 4,
+  };
+
   const configSrc = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
-  assert(configSrc.includes("trailingTpCooldownHours: u.trailingTpCooldownHours ?? 2"),
-    "cooldown keys: config.js defaults trailingTpCooldownHours to 2");
-  assert(configSrc.includes("takeProfitCooldownHours: u.takeProfitCooldownHours ?? 1"),
-    "cooldown keys: config.js defaults takeProfitCooldownHours to 1");
+  const execSrc   = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
+  const defsSrc   = fs.readFileSync(new URL("../tools/definitions.js", import.meta.url), "utf8");
+  const menuSrc   = fs.readFileSync(new URL("../settings-menu.js", import.meta.url), "utf8");
+  const pcSrc     = fs.readFileSync(new URL("../pool-cooldown.js", import.meta.url), "utf8");
 
-  const execSrc = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
-  for (const key of ["trailingTpCooldownHours", "takeProfitCooldownHours"]) {
-    assert(execSrc.includes(`${key}: ["management", "${key}"]`), `cooldown keys: CONFIG_MAP has ${key}`);
-  }
-
-  const defsSrc = fs.readFileSync(new URL("../tools/definitions.js", import.meta.url), "utf8");
-  assert(defsSrc.includes("trailingTpCooldownHours") && defsSrc.includes("takeProfitCooldownHours"),
-    "cooldown keys: both listed in update_config schema");
-
-  // settingValue() must map both keys, or every /settings button renders "off"
-  const menuSrc = fs.readFileSync(new URL("../settings-menu.js", import.meta.url), "utf8");
-  for (const key of ["trailingTpCooldownHours", "takeProfitCooldownHours"]) {
+  for (const [key, def] of Object.entries(COOLDOWN_KEYS)) {
+    assert(new RegExp(`${key}:\\s*u\\.${key}\\s*\\?\\?\\s*${def}\\b`).test(configSrc),
+      `cooldown keys: config.js defaults ${key} to ${def}`);
+    assert(execSrc.includes(`${key}: ["management", "${key}"]`),
+      `cooldown keys: CONFIG_MAP has ${key}`);
+    assert(defsSrc.includes(key), `cooldown keys: ${key} listed in update_config schema`);
+    // settingValue() must map the key, or its /settings button renders "off"
     assert(menuSrc.includes(`${key}: config.management.${key}`),
       `cooldown keys: settingValue() maps ${key} (else the button shows "off")`);
+    assert(menuSrc.includes(`inputButton("${key}"`), `cooldown keys: ${key} has an input button`);
+    // pool-cooldown reads config; the ?? fallback stays only as a safety net and
+    // must not drift away from the config.js default
+    assert(new RegExp(`mgmt\\.${key}\\s*\\?\\?\\s*${def}\\b`).test(pcSrc),
+      `cooldown keys: pool-cooldown reads ${key} with matching ${def}h fallback`);
   }
-  assert(menuSrc.includes('inputButton("trailingTpCooldownHours"'), "cooldown keys: trailing-TP input button exists");
-  assert(menuSrc.includes('inputButton("takeProfitCooldownHours"'), "cooldown keys: take-profit input button exists");
-
-  // pool-cooldown must still read config (the fallback stays as a safety net)
-  const pcSrc = fs.readFileSync(new URL("../pool-cooldown.js", import.meta.url), "utf8");
-  assert(pcSrc.includes("mgmt.trailingTpCooldownHours"), "cooldown keys: pool-cooldown reads trailingTpCooldownHours");
-  assert(pcSrc.includes("mgmt.takeProfitCooldownHours"), "cooldown keys: pool-cooldown reads takeProfitCooldownHours");
 }
 
 // ─── GMGN request pacing — serialised, no bursts ────────────────────────────────

@@ -329,6 +329,8 @@ export const CONFIG_MAP = {
   lossGt1PctCooldownHours: ["management", "lossGt1PctCooldownHours"],
   trailingTpCooldownHours: ["management", "trailingTpCooldownHours"],
   takeProfitCooldownHours: ["management", "takeProfitCooldownHours"],
+  manualCloseCooldownHours: ["management", "manualCloseCooldownHours"],
+  defaultCooldownHours: ["management", "defaultCooldownHours"],
   oorBigLossCooldownHours: ["management", "oorBigLossCooldownHours"],
   oorBigLossPnlThreshold: ["management", "oorBigLossPnlThreshold"],
   cumulativeLossCooldownHours: ["management", "cumulativeLossCooldownHours"],
