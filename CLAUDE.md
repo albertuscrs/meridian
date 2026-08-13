@@ -352,7 +352,9 @@ Rule 3 fires when `active_bin > upper_bin + outOfRangeBinsToClose + bins_above`.
 ### Pool cooldowns (pool-cooldown.js, on every close)
 low yield 4h · stop loss 6h · loss>1% manual 1h · OOR big loss 6h (pnl <
 `oorBigLossPnlThreshold`, −$2) · cumulative pool loss > $5 → 48h · 3+ repeated OOR
-12h · manual 1h · TP exits 1-2h. Longest wins. Stop loss / OOR-big-loss / cumulative
+12h · manual 1h · trailing-TP exit `trailingTpCooldownHours` (2h) · take-profit /
+pumped-above-range exit `takeProfitCooldownHours` (1h). Longest wins. Stop loss /
+OOR-big-loss / cumulative
 also cool the **base mint** across pools. Catastrophic SL (pnl ≤ −10%) →
 permanent blacklist (same threshold as `emergencyClosePct`).
 
